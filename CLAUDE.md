@@ -172,6 +172,24 @@ service it errors with guidance instead of fighting for the port. Verified both
 paths (autostart + reuse) via `rowtr claude --version`. The proxy deliberately
 outlives claude (feeds the tray). All docs/quickstarts now lead with `rowtr claude`.
 
+## Repo, CI, and package testing (all verified 2026-07-06)
+
+- **Private GitHub repo:** https://github.com/chouli12/rowtr (user: chouli12).
+  Clean initial commit, binaries gitignored (`dist/`, `bin/`, stray `cmd/rowtr/rowtr`).
+- **CI:** `.github/workflows/smoke.yml` — on push, builds + unit-tests + smoke-tests
+  (version, usage store, proxy health) on **windows-latest / macos-latest /
+  ubuntu-latest**. First run: ALL THREE GREEN, incl. real Windows (AppData paths,
+  proxy bind, health OK).
+- **Package testing:** `scripts/smoke.sh` runs against a literal release zip;
+  both Linux zips PASS in Docker (Alpine arm64 native + amd64 via QEMU).
+  Docker CANNOT test Windows from a Mac — that's what the Actions matrix is for.
+  Caveat: CI tests source-built binaries, not the literal cross-compiled zips;
+  GoReleaser later can close that gap.
+- Naming note for the user: **x64 = amd64 = x86-64** — the windows-amd64 zip is
+  correct for any 64-bit Intel/AMD Windows machine.
+- Ship flow decided: private repo for source; hand the zip directly to 1–2
+  friends; GitHub Releases (+GoReleaser, public releases-only repo) at ~5+ testers.
+
 ## Roadmap / next steps
 
 1. **Exercise frontier accounting with real traffic:** user runs `rowtr claude`,

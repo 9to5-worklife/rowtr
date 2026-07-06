@@ -1,0 +1,64 @@
+name: smoke
+
+# Build the CLI from source on real Windows/macOS/Linux runners and smoke-test
+# it: version, usage-store creation, proxy boot + health endpoint. This is how
+# the windows-amd64 package gets tested on actual Windows (Docker on a Mac can
+# only test the Linux packages — see scripts/smoke.sh for that path).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Build CLI
+        run: go build -trimpath -ldflags "-s -w -X main.version=ci" -o rowtr${{ runner.os == 'Windows' && '.exe' || '' }} ./cmd/rowtr
+
+      - name: Smoke (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          ./rowtr --version | grep '^rowtr '
+          ./rowtr usage >/dev/null
+          ./rowtr serve --mode observe --addr 127.0.0.1:8791 &
+          PID=$!
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8791/rowtr/health | grep -q '"service":"rowtr"' && ok=1 && break
+            sleep 0.5
+          done
+          kill $PID || true
+          [ "${ok:-0}" = "1" ]
+          echo "PASS"
+
+      - name: Smoke (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = ./rowtr.exe --version
+          if ($v -notmatch '^rowtr ') { throw "bad version output: $v" }
+          ./rowtr.exe usage | Out-Null
+          $p = Start-Process -FilePath ./rowtr.exe -ArgumentList 'serve','--mode','observe','--addr','127.0.0.1:8791' -PassThru -NoNewWindow
+          $ok = $false
+          foreach ($i in 1..20) {
+            try {
+              $r = Invoke-RestMethod -Uri http://127.0.0.1:8791/rowtr/health -TimeoutSec 2
+              if ($r.service -eq 'rowtr') { $ok = $true; break }
+            } catch { Start-Sleep -Milliseconds 500 }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "proxy health never came up" }
+          "PASS"

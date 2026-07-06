@@ -1,0 +1,12 @@
+# Build artifacts — never commit binaries
+/rowtr
+/rowtr-tray
+/bin/
+/dist/
+
+# Local logs / scratch
+*.log
+
+# OS noise
+.DS_Store
+cmd/rowtr/rowtr

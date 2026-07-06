@@ -1,0 +1,21 @@
+Rowtr — Evaluation License
+
+Copyright (c) 2026 Connor Houlihan. All rights reserved.
+
+This software is provided for personal evaluation and testing only. By using it
+you agree that you will NOT:
+
+  1. Redistribute, publish, sell, rent, or sublicense the software or any part
+     of it, in source or binary form;
+  2. Reverse engineer, decompile, or disassemble the software, except where
+     such restriction is prohibited by applicable law;
+  3. Use the software to build a competing product or service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE
+USE OF THE SOFTWARE.
+
+This is an evaluation build of pre-release software. All rights not expressly
+granted are reserved.

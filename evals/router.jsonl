@@ -1,0 +1,36 @@
+// Rowtr router eval set. One JSON object per line.
+//   prompt  : the last user message as Rowtr sees it
+//   tools   : whether the request carries tools
+//   offload : ground truth — should this be served by the LOCAL model?
+// Blank lines and //-comments are ignored. Run:  ./rowtr score
+//
+// --- clear local: simple, tool-free, human turns ---
+{"prompt": "define recursion in one sentence", "tools": false, "offload": true}
+{"prompt": "summarize this paragraph for me", "tools": false, "offload": true}
+{"prompt": "what is a mutex", "tools": false, "offload": true}
+{"prompt": "translate 'good morning' to Spanish", "tools": false, "offload": true}
+{"prompt": "list three primary colors", "tools": false, "offload": true}
+{"prompt": "the weather today", "tools": false, "offload": true, "note": "short ambiguous -> default local"}
+{"prompt": "<system-reminder>context # claudeMd</system-reminder> define entropy", "tools": false, "offload": true, "note": "wrapper stripped -> human turn"}
+//
+// --- clear frontier: reasoning verbs, tool-free but hard ---
+{"prompt": "compare Postgres and DynamoDB with tradeoffs", "tools": false, "offload": false}
+{"prompt": "draft an email to the board about the outage", "tools": false, "offload": false}
+{"prompt": "analyze why this algorithm is slow and propose a fix", "tools": false, "offload": false}
+{"prompt": "brainstorm names for a productivity app", "tools": false, "offload": false}
+{"prompt": "plan how to implement OAuth in this service", "tools": false, "offload": false}
+//
+// --- tool-bearing: always frontier (agentic tool use) ---
+{"prompt": "refactor this function and run the tests", "tools": true, "offload": false}
+{"prompt": "go to this path and explain the code base /Users/chuck/Code/Rowtr", "tools": true, "offload": false}
+{"prompt": "give me a deeper understanding of how the go proxy works", "tools": true, "offload": false}
+{"prompt": "list the files in this directory", "tools": true, "offload": false, "note": "local verb but tools present"}
+//
+// --- agent-internal machinery: must NEVER offload (the log's leak cases) ---
+{"prompt": " Web page content: --- RouteLLM: An Open-Source Framework for Cost-Effective LLM Routing ...", "tools": false, "offload": false}
+{"prompt": "Perform a web search for the query: LLM routing benchmark cost reduction latency", "tools": false, "offload": false}
+{"prompt": "<transcript>{\"user\":\"testing\"} {\"user\":\"go to this path\"}</transcript> tag this conversation", "tools": false, "offload": false}
+{"prompt": "[SUGGESTION MODE: Suggest what the user might naturally type next] plan the next step", "tools": false, "offload": false}
+{"prompt": "<command-name>/usage</command-name> <command-message>usage</command-message>", "tools": false, "offload": false}
+{"prompt": "<task-notification> <task-id>w1xu8qbel</task-id> </task-notification>", "tools": false, "offload": false}
+{"prompt": " Web page content: --- %PDF-1.5 extract the key claims about routing", "tools": false, "offload": false, "note": "PDF extraction leaked to local in the wild"}

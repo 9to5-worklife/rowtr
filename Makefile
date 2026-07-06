@@ -19,7 +19,7 @@ NAME    := rowtr-$(VERSION)-$(OS)-$(ARCH)
 DIST    := dist/$(NAME)
 APP     := $(DIST)/Rowtr.app
 
-CLI_TARGETS := windows/amd64 linux/amd64 linux/arm64
+CLI_TARGETS := windows/amd64 windows/arm64 linux/amd64 linux/arm64
 
 .PHONY: build app dist dist-cli release clean
 

@@ -1,8 +1,6 @@
 // Package eval is Rowtr's scoreboard: it runs the router over a labeled set of
-// prompts and turns "is the routing any good?" into a number. It scores the
-// *offload decision* (would this request be served locally?) because that's the
-// choice that actually saves money — and the choice the routing log showed
-// getting wrong.
+// prompts. It scores the *offload decision* (would this request be served
+// locally?) because that's the choice that actually saves money.
 package eval
 
 import (
@@ -16,7 +14,7 @@ import (
 )
 
 // Case is one labeled example. Offload is the ground truth: should Rowtr serve
-// this locally? Tools mirrors whether the request carries tools.
+// this locally?
 type Case struct {
 	Prompt  string `json:"prompt"`
 	Tools   bool   `json:"tools"`
@@ -99,8 +97,7 @@ func (r Report) Accuracy() float64 {
 	return float64(r.Correct()) / float64(r.Total())
 }
 
-// String renders the scoreboard, listing every mismatch so failures are
-// actionable rather than a bare percentage.
+// String renders the scoreboard, listing every mismatch.
 func (r Report) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "cases: %d   accuracy: %.0f%% (%d/%d correct)\n",

@@ -76,13 +76,9 @@ func (s *Store) Record(e Event) error {
 
 // ModelStat is per-(model,tier) aggregate.
 type ModelStat struct {
-	Model     string
-	Tier      string
-	Count     int
-	InTokens  int
-	OutTokens int
-	CostUSD   float64
-	SavedUSD  float64
+	Model string
+	Tier  string
+	Count int
 }
 
 // Summary is the whole-history rollup the tray app displays.
@@ -93,7 +89,6 @@ type Summary struct {
 	LocalTokens    int     // tokens served locally = tokens kept off the Claude quota
 	FrontierTokens int     // tokens actually spent on Claude (from response usage)
 	SavedUSD       float64 // estimated $ avoided (API pricing only)
-	SpentUSD       float64 // estimated frontier spend (API pricing only)
 	ByModel        []ModelStat
 }
 
@@ -106,16 +101,13 @@ func (s *Store) Summary() (Summary, error) {
 		coalesce(sum(tier = 'frontier'), 0),
 		coalesce(sum(CASE WHEN tier = 'local' THEN in_tokens + out_tokens ELSE 0 END), 0),
 		coalesce(sum(CASE WHEN tier = 'frontier' THEN in_tokens + out_tokens ELSE 0 END), 0),
-		coalesce(sum(saved_usd), 0),
-		coalesce(sum(cost_usd), 0)
+		coalesce(sum(saved_usd), 0)
 		FROM events`)
-	if err := row.Scan(&sum.Total, &sum.Local, &sum.Frontier, &sum.LocalTokens, &sum.FrontierTokens, &sum.SavedUSD, &sum.SpentUSD); err != nil {
+	if err := row.Scan(&sum.Total, &sum.Local, &sum.Frontier, &sum.LocalTokens, &sum.FrontierTokens, &sum.SavedUSD); err != nil {
 		return sum, err
 	}
 
-	rows, err := s.db.Query(`SELECT model, tier, count(*),
-		coalesce(sum(in_tokens), 0), coalesce(sum(out_tokens), 0),
-		coalesce(sum(cost_usd), 0), coalesce(sum(saved_usd), 0)
+	rows, err := s.db.Query(`SELECT model, tier, count(*)
 		FROM events GROUP BY model, tier ORDER BY count(*) DESC`)
 	if err != nil {
 		return sum, err
@@ -123,7 +115,7 @@ func (s *Store) Summary() (Summary, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var m ModelStat
-		if err := rows.Scan(&m.Model, &m.Tier, &m.Count, &m.InTokens, &m.OutTokens, &m.CostUSD, &m.SavedUSD); err != nil {
+		if err := rows.Scan(&m.Model, &m.Tier, &m.Count); err != nil {
 			return sum, err
 		}
 		sum.ByModel = append(sum.ByModel, m)

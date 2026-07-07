@@ -1,7 +1,6 @@
-// Package config holds Rowtr's tunable settings: model IDs, endpoints, and the
-// price table used to estimate per-request cost. Resolution order is
-// defaults → config file → environment variable, so `rowtr setup` can persist
-// choices while env vars still win for one-off overrides.
+// Package config holds Rowtr's tunable settings and price table. Resolution
+// order is defaults → config file → environment variable, so `rowtr setup` can
+// persist choices while env vars win for one-off overrides.
 package config
 
 import (
@@ -18,9 +17,7 @@ type Config struct {
 	ProxyAddr     string `json:"proxy_addr"`
 }
 
-// Defaults. FrontierModel is Claude Opus 4.8 — the frontier tier is the genuinely
-// powerful (expensive) model; LocalModel is a small Gemma (confirm the exact tag
-// with `ollama list`).
+// Built-in defaults.
 const (
 	DefaultFrontierModel = "claude-opus-4-8"
 	DefaultLocalModel    = "gemma3n:e2b"
@@ -56,8 +53,7 @@ func Path() (string, error) {
 	return filepath.Join(d, "config.json"), nil
 }
 
-// UsagePath is the usage database location (written by the proxy, read by the
-// tray app).
+// UsagePath is the usage database location (written by the proxy, read by the tray).
 func UsagePath() (string, error) {
 	d, err := DataDir()
 	if err != nil {
@@ -66,8 +62,7 @@ func UsagePath() (string, error) {
 	return filepath.Join(d, "usage.db"), nil
 }
 
-// Load resolves configuration: defaults, overlaid by the config file (if any),
-// overlaid by environment variables.
+// Load resolves configuration: defaults → config file → environment variables.
 func Load() Config {
 	cfg := Defaults()
 	if p, err := Path(); err == nil {
@@ -140,9 +135,6 @@ type Price struct {
 	OutputPerM float64
 }
 
-// prices maps model IDs to their token prices. Local models run on your own
-// hardware, so their marginal token cost is zero — that $0 is the whole point
-// of routing cheap traffic to them.
 var prices = map[string]Price{
 	"claude-opus-4-8":  {InputPerM: 5.00, OutputPerM: 25.00},
 	"claude-sonnet-5":  {InputPerM: 3.00, OutputPerM: 15.00},
@@ -150,7 +142,7 @@ var prices = map[string]Price{
 }
 
 // EstimateCostUSD returns the estimated dollar cost of a completion. Unknown
-// models (including every local model) cost $0.
+// models cost $0 — local models run on the user's own hardware by design.
 func EstimateCostUSD(model string, inputTokens, outputTokens int) float64 {
 	p, ok := prices[model]
 	if !ok {

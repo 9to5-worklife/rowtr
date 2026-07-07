@@ -35,7 +35,6 @@ func Run(opts Options) error {
 
 	cfg := config.Load()
 
-	// 1. Hardware.
 	info := sysinfo.Detect()
 	fmt.Printf("System:  %s/%s", info.OS, info.Arch)
 	if info.TotalRAMGB > 0 {
@@ -46,12 +45,9 @@ func Run(opts Options) error {
 	}
 	fmt.Println()
 
-	// 2. Recommend a local model.
 	model, why := RecommendModel(info)
 	fmt.Printf("Local model:  recommend %s\n              %s\n", model, why)
 
-	// 3. Ollama — and if it's missing entirely, offer to install/start it so
-	// `rowtr setup` is a one-command bootstrap on a bare machine.
 	reachable, models, detail := CheckOllama(cfg.OllamaHost)
 	fmt.Printf("Ollama:  %s\n", detail)
 	if !reachable {
@@ -60,7 +56,7 @@ func Run(opts Options) error {
 
 	pulled := contains(models, model)
 	if reachable && !pulled {
-		// A multi-GB download must be an explicit choice: --pull, or an
+		// A multi-GB download must be an explicit choice: --pull or an
 		// interactive yes. --yes alone deliberately does NOT trigger it.
 		wantPull := opts.Pull
 		if !wantPull && !opts.AssumeYes {
@@ -77,19 +73,17 @@ func Run(opts Options) error {
 		}
 	}
 
-	// Pick what to actually configure: the recommendation if present, else fall
-	// back to whatever is already installed so the user isn't blocked.
+	// Configure the recommendation if present, else fall back to whatever is
+	// already installed so the user isn't blocked.
 	chosen := model
 	if !pulled && len(models) > 0 {
 		chosen = models[0]
 		fmt.Printf("  using already-installed %s for now\n", chosen)
 	}
 
-	// 4. Claude access.
 	cstatus, _ := CheckClaude(opts, cfg.FrontierModel)
 	fmt.Printf("Claude:  %s\n", cstatus)
 
-	// 5. Persist config.
 	cfg.LocalModel = chosen
 	if opts.AssumeYes || confirm(in, opts, fmt.Sprintf("Save config (local model = %s)?", chosen), true) {
 		p, err := config.Save(cfg)
@@ -105,8 +99,7 @@ func Run(opts Options) error {
 	return nil
 }
 
-// RecommendModel picks a local model sized to the host's RAM. Tags are Ollama
-// names — the user should confirm availability with `ollama pull`.
+// RecommendModel picks a local model (an Ollama tag) sized to the host's RAM.
 func RecommendModel(info sysinfo.Info) (model, why string) {
 	ram := info.TotalRAMGB
 	switch {
@@ -151,9 +144,9 @@ func CheckOllama(host string) (reachable bool, models []string, detail string) {
 	return true, models, fmt.Sprintf("running at %s — installed: %s", host, strings.Join(models, ", "))
 }
 
-// CheckClaude reports whether working Claude access is available. It can verify
-// credentials exist (and, with --probe, that they actually work) but cannot
-// distinguish a subscription from an API key or report the tier.
+// CheckClaude reports whether Claude access is available. It verifies credentials
+// exist (with --probe, that they work) but cannot distinguish a subscription
+// from an API key.
 func CheckClaude(opts Options, model string) (status string, ok bool) {
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		if opts.Probe {
@@ -193,8 +186,7 @@ func probeClaude(key, model string) error {
 }
 
 // bootstrapOllama takes a machine with no reachable Ollama to a running daemon:
-// starts it if the binary/app is installed, offers the platform's install path
-// if not. Returns the post-bootstrap state.
+// installs (with consent) if missing, then starts it. Returns the post-bootstrap state.
 func bootstrapOllama(in *bufio.Reader, opts Options, host string) (bool, []string) {
 	if !ollamaInstalled() {
 		if !confirm(in, opts, "Ollama isn't installed. Install it now?", true) {
@@ -235,9 +227,8 @@ func ollamaInstalled() bool {
 	return false
 }
 
-// installOllama uses the platform's standard install path. Each is the
-// officially documented method; where no package manager exists we point at
-// the download page instead of improvising.
+// installOllama uses the platform's officially documented install method; where
+// no package manager exists it points at the download page instead of improvising.
 func installOllama() error {
 	switch runtime.GOOS {
 	case "darwin":
@@ -258,7 +249,7 @@ func installOllama() error {
 }
 
 // startOllama launches the daemon detached so it outlives setup. On macOS the
-// app (menu-bar Ollama) is preferred when present; otherwise `ollama serve`.
+// menu-bar app is preferred when present; otherwise `ollama serve`.
 func startOllama() error {
 	if runtime.GOOS == "darwin" {
 		if _, err := os.Stat("/Applications/Ollama.app"); err == nil {

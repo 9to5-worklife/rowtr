@@ -33,13 +33,10 @@ import (
 	"github.com/connorhoulihan/rowtr/internal/usage"
 )
 
-// version is stamped at build time via:
-//
-//	go build -ldflags "-X main.version=0.1.0"
+// version is stamped at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	// Subcommand dispatch: `setup`, `serve`, `score`; otherwise one-shot CLI.
 	var err error
 	switch {
 	case len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version"):
@@ -64,8 +61,8 @@ func main() {
 	}
 }
 
-// runUsage prints the recorded usage summary — the cross-platform, GUI-free view
-// of the menu-bar app's numbers.
+// runUsage prints the usage summary — the cross-platform, GUI-free view of the
+// menu-bar app's numbers.
 func runUsage(_ []string) error {
 	p, err := config.UsagePath()
 	if err != nil {
@@ -104,10 +101,9 @@ func runUsage(_ []string) error {
 	return nil
 }
 
-// runClaude is the launcher: it makes sure a Rowtr proxy is running (starting
-// one in the background if needed), then launches Claude Code already pointed
-// at it — no ANTHROPIC_BASE_URL for the user to remember. Extra args pass
-// through to claude (`rowtr claude --resume`, etc.).
+// runClaude ensures a Rowtr proxy is running (starting one in the background if
+// needed), then launches Claude Code pointed at it — no ANTHROPIC_BASE_URL for
+// the user to remember. Extra args pass through to claude.
 func runClaude(args []string) error {
 	cfg := config.Load()
 	base := "http://" + cfg.ProxyAddr
@@ -120,7 +116,6 @@ func runClaude(args []string) error {
 		if err := startProxyDetached(); err != nil {
 			return fmt.Errorf("starting rowtr proxy: %w", err)
 		}
-		// Wait for it to come up.
 		up := false
 		for i := 0; i < 20; i++ {
 			if proxyHealthy(base) {
@@ -154,7 +149,7 @@ func runClaude(args []string) error {
 	return nil
 }
 
-// proxyHealthy reports whether a Rowtr proxy answers on base.
+// proxyHealthy reports whether base answers as a Rowtr proxy (not just any server).
 func proxyHealthy(base string) bool {
 	client := &http.Client{Timeout: 1 * time.Second}
 	resp, err := client.Get(base + "/rowtr/health")
@@ -171,7 +166,6 @@ func proxyHealthy(base string) bool {
 	return body.Service == "rowtr"
 }
 
-// portBusy reports whether anything is listening on addr.
 func portBusy(addr string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 	if err != nil {
@@ -182,7 +176,7 @@ func portBusy(addr string) bool {
 }
 
 // startProxyDetached re-execs this binary as `rowtr serve --mode route`,
-// detached, with output going to a log file in the config dir.
+// detached, logging to proxy.log in the config dir.
 func startProxyDetached() error {
 	self, err := os.Executable()
 	if err != nil {
@@ -299,7 +293,6 @@ func run() error {
 	cfg := config.Load()
 	p := pipeline.New(
 		router.KeywordRouter{},
-		cfg,
 		backend.NewOllama(cfg.OllamaHost, cfg.LocalModel),
 		backend.NewAnthropic(cfg.FrontierModel),
 	)
@@ -325,7 +318,7 @@ func run() error {
 	return nil
 }
 
-// readPrompt takes the prompt from CLI args (joined) or, if none, from stdin.
+// readPrompt takes the prompt from CLI args (joined) or, failing that, stdin.
 func readPrompt(args []string) (string, error) {
 	if len(args) > 0 {
 		return strings.Join(args, " "), nil

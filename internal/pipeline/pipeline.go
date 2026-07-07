@@ -1,6 +1,5 @@
-// Package pipeline wires the router to the backends: it routes a prompt, selects
-// the matching backend, dispatches, and assembles a Result with the metrics that
-// make routing measurable (which tier, latency, token cost).
+// Package pipeline routes a prompt, dispatches it to the matching backend, and
+// assembles a Result with the metrics that make routing measurable.
 package pipeline
 
 import (
@@ -13,8 +12,8 @@ import (
 	"github.com/connorhoulihan/rowtr/internal/router"
 )
 
-// Result is everything Rowtr learned from handling one prompt. It's the unit the
-// slice-2 scoreboard will consume, so it carries both the answer and the metrics.
+// Result is everything Rowtr learned from handling one prompt: the answer plus
+// the routing metrics.
 type Result struct {
 	Decision   router.Decision `json:"decision"`
 	Backend    string          `json:"backend"`
@@ -30,16 +29,15 @@ type Result struct {
 type Pipeline struct {
 	router   router.Router
 	backends map[router.Tier]backend.Backend
-	cfg      config.Config
 }
 
 // New builds a pipeline from a router and a set of backends.
-func New(r router.Router, cfg config.Config, backends ...backend.Backend) *Pipeline {
+func New(r router.Router, backends ...backend.Backend) *Pipeline {
 	m := make(map[router.Tier]backend.Backend, len(backends))
 	for _, b := range backends {
 		m[b.Tier()] = b
 	}
-	return &Pipeline{router: r, backends: m, cfg: cfg}
+	return &Pipeline{router: r, backends: m}
 }
 
 // Run routes and executes a prompt. forceTier, when non-nil, overrides the

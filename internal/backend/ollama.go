@@ -12,9 +12,8 @@ import (
 	"github.com/connorhoulihan/rowtr/internal/router"
 )
 
-// Ollama is the local Gatekeeper backend. It talks to the Ollama daemon over its
-// HTTP API directly (via net/http) rather than pulling in the full Ollama Go
-// module — slice 1 only needs a single /api/chat call.
+// Ollama is the local Gatekeeper backend. It calls the daemon's /api/chat over
+// plain net/http rather than pulling in the full Ollama Go module.
 type Ollama struct {
 	Host  string // base URL, e.g. http://localhost:11434
 	Model string // model name, e.g. llama3.2
@@ -33,8 +32,8 @@ func NewOllama(host, model string) *Ollama {
 func (o *Ollama) Name() string      { return "ollama" }
 func (o *Ollama) Tier() router.Tier { return router.Local }
 
-// Available pings the daemon's root endpoint. A connection error here almost
-// always means Ollama isn't installed or `ollama serve` isn't running.
+// Available pings the daemon's root endpoint; a connection error almost always
+// means Ollama isn't installed or `ollama serve` isn't running.
 func (o *Ollama) Available(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -83,10 +82,9 @@ func (o *Ollama) Complete(ctx context.Context, prompt string) (Response, error) 
 	return o.chat(ctx, []ollamaMessage{{Role: "user", Content: prompt}})
 }
 
-// Chat runs a multi-turn completion: an optional system prompt plus the
-// conversation so far. The proxy uses this to offload a whole Claude Code
-// conversation to the local tier. Empty turns are dropped, and any role that
-// isn't user/assistant/system is coerced to user (Ollama only knows those).
+// Chat runs a multi-turn completion: optional system prompt plus conversation.
+// Empty turns are dropped; roles other than user/assistant/system are coerced
+// to user (Ollama only knows those).
 func (o *Ollama) Chat(ctx context.Context, system string, msgs []ChatMessage) (Response, error) {
 	om := make([]ollamaMessage, 0, len(msgs)+1)
 	if strings.TrimSpace(system) != "" {
@@ -105,7 +103,6 @@ func (o *Ollama) Chat(ctx context.Context, system string, msgs []ChatMessage) (R
 	return o.chat(ctx, om)
 }
 
-// chat performs the non-streaming /api/chat call shared by Complete and Chat.
 func (o *Ollama) chat(ctx context.Context, msgs []ollamaMessage) (Response, error) {
 	body, err := json.Marshal(ollamaChatRequest{Model: o.Model, Messages: msgs, Stream: false})
 	if err != nil {

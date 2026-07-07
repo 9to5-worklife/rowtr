@@ -7,27 +7,22 @@ import (
 	"strings"
 )
 
-// frontierTap wraps an upstream response body and extracts token usage as the
-// bytes stream through to the client — zero buffering of the full response.
-//
-// Anthropic reports usage in two shapes:
-//   - streaming (SSE): `message_start` carries model + input_tokens,
-//     `message_delta` carries the final output_tokens
-//   - non-streaming JSON: one object with `model` and `usage`
-//
-// When the body finishes (EOF or Close), done() fires exactly once with
-// whatever was found.
+// frontierTap wraps an upstream response body and extracts token usage as
+// bytes stream through to the client. Anthropic reports usage in two shapes:
+// SSE (`message_start` carries model + input_tokens, `message_delta` the final
+// output_tokens) or one JSON object with `model` and `usage`. On EOF or Close,
+// done() fires exactly once with whatever was found.
 type frontierTap struct {
 	inner io.ReadCloser
 	isSSE bool
 	done  func(model string, inTok, outTok int)
 
-	line  bytes.Buffer // current SSE line
-	body  bytes.Buffer // whole body (JSON mode only)
-	model string
-	inTok int
+	line   bytes.Buffer // current SSE line
+	body   bytes.Buffer // whole body (JSON mode only)
+	model  string
+	inTok  int
 	outTok int
-	fired bool
+	fired  bool
 }
 
 const (
@@ -100,8 +95,7 @@ func (t *frontierTap) handleLine(line string) {
 		t.model = ev.Message.Model
 		t.inTok = ev.Message.Usage.InputTokens
 	case "message_delta":
-		// output_tokens here is the cumulative final count; input may be
-		// restated too.
+		// output_tokens is the cumulative final count; input may be restated.
 		if ev.Usage.OutputTokens > 0 {
 			t.outTok = ev.Usage.OutputTokens
 		}

@@ -6,13 +6,12 @@ import (
 	"strings"
 )
 
-// Outcome is Rowtr's full routing decision for one request, independent of proxy
-// mode. It's the single source of truth shared by the proxy and the scoreboard
-// so the two can't drift apart.
+// Outcome is the full routing decision for one request — the single source of
+// truth shared by the proxy and the scoreboard so the two can't drift apart.
 //
-// Offloadable is true only when the request is genuinely eligible to be served
-// locally: the router picked Local, there are no tools, and it's a real human
-// turn rather than Claude Code's internal machinery.
+// Offloadable is true only when the request is eligible to be served locally:
+// the router picked Local, there are no tools, and it's a real human turn
+// rather than Claude Code's internal machinery.
 type Outcome struct {
 	Tier        Tier
 	Reason      string
@@ -40,10 +39,9 @@ func Decide(r Router, rawUserText string, hasTools bool) Outcome {
 	}
 }
 
-// internalMarkers flag a request as Claude Code's own machinery rather than a
-// human turn. These are the tool-free sub-calls that leaked to local in the
-// wild (see the routing log): web-page/transcript processing, search sub-calls,
-// slash-command expansions, suggestion mode, workflow sub-agent prompts.
+// internalMarkers flag a request as Claude Code's own machinery (web-page and
+// transcript processing, search sub-calls, slash-command expansions, suggestion
+// mode) rather than a human turn.
 var internalMarkers = []string{
 	"web page content:",
 	"perform a web search for the query",
@@ -56,9 +54,9 @@ var internalMarkers = []string{
 	"source extractor",
 }
 
-// wrapperTags are containers Claude Code wraps around (or alongside) a real
-// human turn. We strip the whole block so the router sees only what the user
-// typed. RE2 has no backreferences, so we compile one regex per tag.
+// wrapperTags are containers Claude Code wraps around a real human turn; whole
+// blocks are stripped so the router sees only what the user typed. RE2 has no
+// backreferences, so one regex is compiled per tag.
 var wrapperTags = []string{
 	"system-reminder", "session",
 	"command-name", "command-message", "command-args", "local-command-stdout",

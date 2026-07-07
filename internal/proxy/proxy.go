@@ -1,18 +1,9 @@
-// Package proxy makes Rowtr a transparent, Anthropic-API-compatible endpoint
-// that a client (e.g. Claude Code via ANTHROPIC_BASE_URL) can point at.
-//
-// It runs in one of two modes:
-//
-//   - observe: every request is forwarded to the real Anthropic API unchanged;
-//     Rowtr only logs which tier it WOULD route to. Safe — cannot change client
-//     behavior. This is the default.
-//   - route: additionally diverts requests the router marks Local *and* that
-//     carry no tools to the local Ollama model, translating the result back into
-//     Anthropic's response shape. Everything else still goes to the frontier.
-//
-// The route path is defensive: it runs the local completion to completion
-// BEFORE writing any bytes, so any failure (Ollama down, model missing, etc.)
-// falls back to the frontier with nothing sent — the client never breaks.
+// Package proxy is an Anthropic-API-compatible endpoint clients point at via
+// ANTHROPIC_BASE_URL. In observe mode (default) everything is forwarded and
+// only logged; in route mode, Local + tool-free requests are diverted to Ollama
+// and translated back into Anthropic's response shape. The local completion
+// runs fully BEFORE any bytes are written, so failures fall back to the
+// frontier cleanly — the client never breaks.
 package proxy
 
 import (
@@ -54,9 +45,8 @@ type Server struct {
 	counter  atomic.Uint64
 }
 
-// New builds a proxy. upstream is the frontier base URL (https://api.anthropic.com);
-// local is the Ollama backend used for offload in route mode; store (nullable)
-// records usage for the tray app.
+// New builds a proxy. upstream is the frontier base URL; local serves route-mode
+// offloads; store may be nil.
 func New(r router.Router, upstream string, local *backend.Ollama, mode Mode, store *usage.Store, logger *log.Logger) (*Server, error) {
 	u, err := url.Parse(upstream)
 	if err != nil {
@@ -67,7 +57,7 @@ func New(r router.Router, upstream string, local *backend.Ollama, mode Mode, sto
 	return s, nil
 }
 
-// record persists a usage event, tolerating a nil store or a write error.
+// record persists a usage event; a nil store or write error is tolerated.
 func (s *Server) record(e usage.Event) {
 	if s.store == nil {
 		return
@@ -81,16 +71,13 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(s.upstream)
 	rp.FlushInterval = -1 // flush every write immediately — required for SSE
 
-	// Fix the Host header: the upstream is TLS and routes on Host/SNI, so it
-	// must be api.anthropic.com, not the client's localhost:port.
 	base := rp.Director
 	rp.Director = func(req *http.Request) {
 		base(req)
+		// Host must be the upstream's — TLS routes on Host/SNI.
 		req.Host = s.upstream.Host
-		// Drop the client's Accept-Encoding: Go's transport then negotiates
-		// gzip itself and transparently decompresses, so the accounting tap
-		// (ModifyResponse) sees plaintext. With the client's own header passed
-		// through, the tap would see compressed bytes and parse nothing.
+		// Strip Accept-Encoding so Go's transport handles gzip itself and the
+		// accounting tap (ModifyResponse) sees plaintext.
 		req.Header.Del("Accept-Encoding")
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -99,8 +86,7 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 	}
 
 	// Frontier token accounting: tap successful /v1/messages responses and
-	// record the real usage Anthropic reports (SSE or JSON), so the tray can
-	// show tokens spent on Claude, not just request counts.
+	// record the real usage Anthropic reports (SSE or JSON).
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if s.store == nil || resp.Request == nil ||
 			resp.Request.Method != http.MethodPost ||
@@ -129,8 +115,8 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Health endpoint served by Rowtr itself (never proxied) — lets `rowtr
-	// claude` recognize a running Rowtr proxy vs something else on the port.
+	// Served by Rowtr itself (never proxied) — lets `rowtr claude` tell a
+	// Rowtr proxy from something else on the port.
 	mux.HandleFunc("/rowtr/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"service":"rowtr","mode":%q}`, s.mode)
@@ -145,7 +131,6 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	req, _ := parseRequest(body)
 	rawUser := lastUserText(req)
 
-	// Non-message-shaped or empty-user bodies just forward untouched.
 	if strings.TrimSpace(rawUser) == "" {
 		s.rp.ServeHTTP(w, r)
 		return
@@ -153,13 +138,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	hasTools := len(req.Tools) > 0
 
-	// Decide extracts the human's real intent — stripping Claude Code's injected
-	// wrappers (system-reminder, transcript, slash commands) and flagging agent-
-	// internal machinery (fetched web pages, search sub-calls, suggestion mode).
-	// So we route on what the user asked, not on verbs buried in a payload, and
-	// never offload Claude Code's own tool-free sub-calls. See router/intent.go.
-	// The offload guard also requires route mode and no tools — tool-bearing
-	// turns need the frontier's agentic tool calling.
+	// Decide routes on the extracted human intent, not raw payload text.
+	// Tool-bearing requests never offload — they need the frontier.
 	out := router.Decide(s.router, rawUser, hasTools)
 	offload := s.mode == ModeRoute && s.local != nil && out.Offloadable
 
@@ -172,14 +152,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if offload {
 		s.log.Printf("local offload failed — forwarding to frontier instead")
 	}
-	// Frontier requests are recorded by the ModifyResponse tap (real token
-	// counts from the response), not here.
+	// Frontier usage is recorded by the ModifyResponse tap, not here.
 	s.rp.ServeHTTP(w, r)
 }
 
 // serveLocal runs the local completion and, on success, writes an Anthropic-
-// shaped response. It returns false (having written nothing) if the local tier
-// can't serve the request, so the caller can fall back to the frontier.
+// shaped response. On failure it returns false having written nothing, so the
+// caller can fall back to the frontier.
 func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropicRequest) bool {
 	if err := s.local.Available(r.Context()); err != nil {
 		s.log.Printf("ollama unavailable: %v", err)
@@ -192,8 +171,8 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropi
 		msgs = append(msgs, backend.ChatMessage{Role: m.Role, Content: extractText(m.Content)})
 	}
 
-	// Complete the whole thing before writing anything — this is what makes the
-	// frontier fallback clean.
+	// Complete fully before writing anything — this keeps the frontier
+	// fallback clean.
 	start := time.Now()
 	resp, err := s.local.Chat(r.Context(), system, msgs)
 	if err != nil {
@@ -202,8 +181,8 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropi
 	}
 	latency := time.Since(start)
 
-	// Record the offload. SavedUSD is the estimate: what the frontier model the
-	// client asked for (req.Model) would have charged for these token counts.
+	// SavedUSD estimates what the requested frontier model would have charged
+	// for these token counts.
 	s.record(usage.Event{
 		Time:         time.Now(),
 		Tier:         "local",
@@ -215,7 +194,6 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropi
 		SavedUSD:     config.EstimateCostUSD(req.Model, resp.InputTokens, resp.OutputTokens),
 	})
 
-	// Header signal for anyone inspecting which tier served the turn.
 	w.Header().Set("X-Rowtr-Tier", "local")
 	w.Header().Set("X-Rowtr-Model", resp.Model)
 
@@ -227,9 +205,8 @@ func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropi
 	return true
 }
 
-// writeJSON emits a non-streaming Anthropic Message. It echoes the requested
-// model string so the client sees the shape it expects; the real backend is
-// disclosed via the X-Rowtr-* headers and the proxy log.
+// writeJSON emits a non-streaming Anthropic Message, echoing the requested
+// model string; the real backend is disclosed via the X-Rowtr-* headers.
 func (s *Server) writeJSON(w http.ResponseWriter, model string, resp backend.Response) {
 	out := map[string]any{
 		"id":            s.msgID(),
@@ -249,9 +226,8 @@ func (s *Server) writeJSON(w http.ResponseWriter, model string, resp backend.Res
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// writeSSE emits the Anthropic streaming event sequence for a single text block.
-// The full local completion is delivered as one text_delta — Claude Code accepts
-// this; true token-by-token streaming from Ollama is a later refinement.
+// writeSSE emits the Anthropic streaming event sequence for a single text
+// block; the full local completion is delivered as one text_delta.
 func (s *Server) writeSSE(w http.ResponseWriter, model string, resp backend.Response) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -301,8 +277,8 @@ func (s *Server) msgID() string {
 	return fmt.Sprintf("msg_rowtr_local_%d", s.counter.Add(1))
 }
 
-// readAndRestore reads the request body (to inspect it) and restores it so the
-// request can still be forwarded intact.
+// readAndRestore reads the request body and restores it so the request can
+// still be forwarded intact.
 func (s *Server) readAndRestore(r *http.Request) []byte {
 	if r.Body == nil {
 		return nil
@@ -318,8 +294,6 @@ func (s *Server) readAndRestore(r *http.Request) []byte {
 	r.ContentLength = int64(len(body))
 	return body
 }
-
-// --- Minimal Anthropic request parsing ---
 
 type anthropicRequest struct {
 	Model    string            `json:"model"`
@@ -349,8 +323,8 @@ func lastUserText(req anthropicRequest) string {
 	return ""
 }
 
-// extractText handles both content shapes: a bare string, or an array of blocks
-// (we concatenate the text blocks and ignore the rest — images, tool_use, etc.).
+// extractText handles both content shapes: a bare string, or an array of
+// blocks (text blocks concatenated; images, tool_use, etc. ignored).
 func extractText(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""

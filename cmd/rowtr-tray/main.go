@@ -1,12 +1,9 @@
-// Command rowtr-tray is Rowtr's menu-bar app. It reads the usage database the
-// proxy writes and shows, right in the menu bar, how much Claude quota you've
-// conserved by serving requests locally — the value that matters on a flat-rate
-// subscription. A per-token dollar estimate is a secondary line for API users.
+// Command rowtr-tray is Rowtr's menu-bar app: it reads the usage database the
+// proxy writes and shows how much Claude quota was conserved by serving
+// requests locally — the number that matters on a flat-rate subscription.
 //
-// This is a separate binary from `rowtr` because the tray library uses native
-// GUI APIs (cgo); the proxy/CLI stay cgo-free. Build on the target OS:
-//
-//	go build -o rowtr-tray ./cmd/rowtr-tray
+// It is a separate binary because the tray library needs cgo; the proxy/CLI
+// stay cgo-free. Build on the target OS.
 package main
 
 import (
@@ -86,7 +83,6 @@ func refresh(mKept, mRate, mMoney *systray.MenuItem, modelItems []*systray.MenuI
 		return
 	}
 
-	// Menu-bar headline = tokens kept off your Claude quota.
 	systray.SetTitle(fmt.Sprintf("%s tok saved", humanTokens(sum.LocalTokens)))
 	mKept.SetTitle(fmt.Sprintf("Kept off Claude: %d requests · %s tokens", sum.Local, humanTokens(sum.LocalTokens)))
 

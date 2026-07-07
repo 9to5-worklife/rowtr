@@ -17,8 +17,8 @@ type Anthropic struct {
 	client    anthropic.Client
 }
 
-// NewAnthropic constructs the backend. The client reads ANTHROPIC_API_KEY from
-// the environment; if it's unset, Available reports that before we ever dispatch.
+// NewAnthropic constructs the backend; the client reads ANTHROPIC_API_KEY from
+// the environment.
 func NewAnthropic(model string) *Anthropic {
 	return &Anthropic{
 		Model:     model,

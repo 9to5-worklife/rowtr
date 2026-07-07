@@ -1,4 +1,4 @@
-// Package backend defines the model-execution interface and its two slice-1
+// Package backend defines the model-execution interface and its two
 // implementations: Ollama (local Gatekeeper) and Anthropic (frontier Expert).
 package backend
 
@@ -24,10 +24,8 @@ type Backend interface {
 	// Tier reports which router tier this backend serves.
 	Tier() router.Tier
 	// Available returns nil if the backend can be used right now, or an
-	// actionable error (missing key, daemon down) otherwise. The pipeline
-	// checks this before dispatching so we fail with a clear message instead
-	// of a cryptic network/panic — and never silently reroute, which would
-	// corrupt measurement.
+	// actionable error (missing key, daemon down). Checked before dispatch so
+	// failure is a clear error, never a silent reroute that corrupts metrics.
 	Available(ctx context.Context) error
 	// Complete runs the prompt and returns a normalized Response.
 	Complete(ctx context.Context, prompt string) (Response, error)

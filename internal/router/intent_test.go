@@ -4,10 +4,10 @@ import "testing"
 
 func TestDecide_Offloadable(t *testing.T) {
 	cases := []struct {
-		name        string
-		prompt      string
-		tools       bool
-		wantOffload bool
+		name         string
+		prompt       string
+		tools        bool
+		wantOffload  bool
 		wantInternal bool
 	}{
 		{"human local verb", "define recursion", false, true, false},
@@ -15,8 +15,8 @@ func TestDecide_Offloadable(t *testing.T) {
 		{"frontier verb stays frontier", "compare A and B", false, false, false},
 		{"tool-bearing never offloads", "list the files", true, false, false},
 		{"system-reminder wrapped human", "<system-reminder>ctx # claudeMd</system-reminder> define entropy", false, true, false},
-		// The failure cases straight from the routing log — all agent-internal,
-		// all must stay frontier even though they contain frontier/local verbs.
+		// Agent-internal payloads must stay frontier even though they
+		// contain frontier/local verbs.
 		{"web page content", " Web page content: --- compare LLM routers ...", false, false, true},
 		{"web search sub-call", "Perform a web search for the query: RouteLLM cost", false, false, true},
 		{"transcript sub-call", `<transcript>{"user":"x"}</transcript> tag this`, false, false, true},

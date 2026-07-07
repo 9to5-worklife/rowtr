@@ -28,16 +28,23 @@ xattr -dr com.apple.quarantine .
 
 Then:
 ```
-./rowtr setup            # checks machine, installs Ollama if missing, recommends a model
+./rowtr setup            # checks machine, recommends a local model
 # fully hands-off (installs Ollama AND downloads the model, several GB):
-./rowtr setup --yes --pull
+./rowtr setup --yes --install --pull
 
 ./rowtr claude           # starts the Rowtr proxy AND Claude Code, already connected
 ```
+(`--yes` alone never installs software or downloads models — those need
+`--install` / `--pull` or an interactive yes.)
 
 That's it — `rowtr claude` replaces the `claude` command. Any arguments pass
 through (`./rowtr claude --resume`). The proxy keeps running in the background
 after Claude Code exits.
+
+The first `rowtr claude` asks whether to route eligible prompts to your local
+model; until you say yes it runs in **observe** mode (everything goes to Claude,
+routing is only logged). Change your answer any time with `rowtr claude --route`
+/ `--observe`. When a session ends, Rowtr prints what was answered locally.
 
 Open **Rowtr.app** (it appears in your menu bar, top-right) to watch how many
 tokens/requests were kept off your Claude quota. On coding work most turns still
@@ -45,7 +52,8 @@ go to Claude (they need tools) — the wins show up on simple, tool-free questio
 
 ## Notes
 
-- `--mode observe` (instead of `route`) forwards everything to Claude and only
-  logs what it *would* route — a safe way to see your traffic first.
 - Config and usage live in `~/Library/Application Support/rowtr/`.
+- The proxy only accepts requests from clients started by `rowtr claude` (a
+  local auth token, generated on first start). Running `rowtr serve` by hand
+  prints the header to copy for other clients, or use `--no-auth`.
 - This is early test software — expect rough edges, and tell Chuck what breaks.

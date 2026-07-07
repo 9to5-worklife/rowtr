@@ -49,7 +49,8 @@ go build -o rowtr ./cmd/rowtr      # produces ./rowtr — rebuild after code cha
 verifies Ollama is running, checks for working Claude access, and writes a config
 file (`~/Library/Application Support/rowtr/config.json` on macOS, `~/.config/rowtr/`
 on Linux) so you don't need env vars. Flags: `--yes`
-(non-interactive), `--pull` (download the recommended model), `--probe` (make a
+(non-interactive — never installs or downloads by itself), `--install` (install
+Ollama if missing), `--pull` (download the recommended model), `--probe` (make a
 tiny Claude call to confirm credentials work).
 
 > It can confirm Claude credentials *exist and work*, but can't tell a
@@ -187,3 +188,10 @@ go build ./...
 go vet ./...
 go test ./...   # router decisions are covered by table-driven tests
 ```
+
+## Trust & distribution
+
+Release binaries are currently unsigned and hand-distributed. **If you didn't
+get the zip directly from someone you trust, build from source** (`go build
+./cmd/rowtr`) — it's one command and removes the question entirely. Signed,
+notarized, CI-built releases come when distribution widens.

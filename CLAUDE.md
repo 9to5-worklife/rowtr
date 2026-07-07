@@ -213,9 +213,71 @@ outlives claude (feeds the tray). All docs/quickstarts now lead with `rowtr clau
   is created + release uploaded. Real signing/notarization remains the eventual
   fix for browser downloads.
 
+## Security hardening + Windows first-run (2026-07-07)
+
+Implemented the full security-review fix list in one pass (all verified locally,
+unit + live):
+
+1. **Log hygiene:** routing log lines no longer contain prompt text — `intent=`
+   only appears with `ROWTR_DEBUG_INTENT=1`. `proxy.log` is 0o600 and truncates
+   on open past 5MB. (Note: pre-existing proxy.log still holds old prompt
+   fragments until its first truncation.)
+2. **Bind constraints:** `serve` refuses non-loopback `--addr` (incl. `:port`
+   empty-host) and cleartext `http://` non-local `--upstream` without
+   `--unsafe-remote` (which prints a warning).
+3. **Mutual auth:** 32-byte token at config dir/`proxy-token` (0o600, created by
+   the proxy, reused across restarts). Health answers `?nonce=` with an
+   HMAC-SHA256 proof — `rowtr claude` refuses listeners that can't prove they
+   hold the token file (verified with a fake-listener test). Clients must send
+   `x-rowtr-auth` on /v1/messages (constant-time compare, 401 with
+   Anthropic-shaped error otherwise, stripped in Director before upstream).
+   `rowtr claude` injects it via `ANTHROPIC_CUSTOM_HEADERS` (confirmed supported
+   by Claude Code docs; appends to any existing value). `serve --no-auth` opts
+   out; manual serve prints the export line. Legacy proxy (no token) → launcher
+   warns + proceeds (never break the client).
+4. **Routing consent:** `rowtr claude` now asks once ("Route eligible prompts to
+   the local model? [Y/n]") and persists `proxy_mode` in config; until consent
+   it autostarts **observe**. `rowtr claude --route|--observe` override+persist
+   (consumed by rowtr, not passed to claude). Non-interactive/EOF stdin →
+   observe, nothing persisted (silence ≠ consent). After claude exits the
+   launcher prints a session summary (N requests · tokens answered locally by
+   model). **Chuck's config.json deliberately has no proxy_mode yet — he gets
+   the consent prompt on his next `rowtr claude`.**
+   Persisting uses `config.LoadFile()` (file-only) so env overrides (e.g.
+   ROWTR_PROXY_ADDR during testing) never get baked into config.json — that bug
+   actually fired during verification and is fixed.
+5. **`setup --install`:** installing Ollama now needs explicit `--install` or an
+   interactive yes — `--yes` never installs (mirrors the `--pull` pattern).
+   Linux downloads install.sh to a temp file, prints path + sha256, then runs.
+   Hands-off bootstrap is now `rowtr setup --yes --install --pull` (docs updated).
+6. **Supply chain:** smoke.yml actions pinned to commit SHAs; README gained a
+   "Trust & distribution" build-from-source note.
+7. **Robustness:** body inspection capped at 64MB (oversized bodies forward
+   untouched via a stitched MultiReader); `truncate` is rune-safe; health
+   discloses `mode` only to callers presenting the token.
+
+**Windows "exe doesn't open" (friend's report):** two causes — no installer
+(double-click ran the one-shot CLI which blocked on stdin; console flashed/hung)
++ SmartScreen on unsigned downloads. Fixed: double-click detection via kernel32
+`GetConsoleProcessList` (`cmd/rowtr/console_windows.go`) → welcome screen that
+offers to run setup and pauses before closing; no-arg `rowtr` on a TTY prints
+usage instead of blocking; QUICKSTART-cli.md now has a "Windows: first run"
+section (SmartScreen → More info → Run anyway / `Unblock-File`).
+
+New/changed surface: `proxy.Options{...Token, RequireAuth, DebugIntent}` (New
+takes the struct now), `proxy.LoadOrCreateToken`/`HealthProof`/`AuthHeader`,
+`config.TokenPath`/`LoadFile`/`Config.ProxyMode`, `usage.SummarySince`,
+`internal/proxy/proxy_test.go` (auth/health/truncate coverage).
+
 ## Roadmap / next steps
 
-1. **Re-verify frontier accounting** after the user restarts the proxy (gzip fix).
+1. **User restarts the proxy** (`pkill rowtr && rowtr claude`) — picks up gzip
+   fix + auth + consent prompt in one go. NOTE: the restart must be done from a
+   NEW terminal, not from inside a Claude Code session running through the
+   proxy (killing it drops that session), and any already-running claude
+   sessions need relaunching via `rowtr claude` afterwards (they lack the auth
+   header the new proxy requires). Then re-verify `rowtr usage` shows frontier
+   tokens.
 1b. **Test the Ollama bootstrap on a bare machine** (friend's Windows/Linux box).
 1c. **When ready to go public:** create public `rowtr-releases` repo, upload the
     zips + `scripts/install.sh`, and the curl one-liner goes live unchanged.

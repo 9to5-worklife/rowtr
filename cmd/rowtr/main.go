@@ -8,7 +8,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,6 +20,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +56,8 @@ func main() {
 		err = runUsage(os.Args[2:])
 	case len(os.Args) > 1 && os.Args[1] == "claude":
 		err = runClaude(os.Args[2:])
+	case len(os.Args) == 1 && doubleClicked():
+		err = runWelcome()
 	default:
 		err = run()
 	}
@@ -101,69 +107,243 @@ func runUsage(_ []string) error {
 	return nil
 }
 
-// runClaude ensures a Rowtr proxy is running (starting one in the background if
-// needed), then launches Claude Code pointed at it — no ANTHROPIC_BASE_URL for
-// the user to remember. Extra args pass through to claude.
+// runClaude ensures a verified Rowtr proxy is running (starting one in the
+// background if needed), then launches Claude Code pointed at it with the auth
+// header injected — no ANTHROPIC_BASE_URL for the user to remember. The
+// rowtr-owned --route/--observe flags are consumed here and persist the routing
+// choice; everything else passes through to claude.
 func runClaude(args []string) error {
-	cfg := config.Load()
-	base := "http://" + cfg.ProxyAddr
+	mode := ""
+	rest := args[:0:0]
+	for _, a := range args {
+		switch a {
+		case "--route":
+			mode = "route"
+		case "--observe":
+			mode = "observe"
+		default:
+			rest = append(rest, a)
+		}
+	}
+	args = rest
 
-	if !proxyHealthy(base) {
+	cfg := config.Load()
+	switch {
+	case mode != "": // explicit flag wins and is remembered
+		if mode != cfg.ProxyMode {
+			persistProxyMode(mode)
+		}
+	case cfg.ProxyMode != "":
+		mode = cfg.ProxyMode
+	default:
+		mode = askRoutingConsent(cfg)
+	}
+
+	base := "http://" + cfg.ProxyAddr
+	tokenPath, err := config.TokenPath()
+	if err != nil {
+		return err
+	}
+	token := readToken(tokenPath)
+
+	st := probeProxy(base, token)
+	switch {
+	case !st.responding:
 		if portBusy(cfg.ProxyAddr) {
-			return fmt.Errorf("port %s is in use by something that isn't a Rowtr proxy (an old rowtr build, or another service)\n"+
+			return fmt.Errorf("port %s is in use by something that isn't a Rowtr proxy\n"+
 				"  stop it, or pick another port: export ROWTR_PROXY_ADDR=127.0.0.1:8790", cfg.ProxyAddr)
 		}
-		if err := startProxyDetached(); err != nil {
+		if err := startProxyDetached(mode); err != nil {
 			return fmt.Errorf("starting rowtr proxy: %w", err)
 		}
-		up := false
 		for i := 0; i < 20; i++ {
-			if proxyHealthy(base) {
-				up = true
+			token = readToken(tokenPath) // the proxy creates it on first start
+			if st = probeProxy(base, token); st.isRowtr {
 				break
 			}
 			time.Sleep(250 * time.Millisecond)
 		}
-		if !up {
-			return fmt.Errorf("proxy didn't come up on %s — check the log in the rowtr config dir", cfg.ProxyAddr)
+		if !st.isRowtr {
+			return fmt.Errorf("proxy didn't come up on %s — check proxy.log in the rowtr config dir", cfg.ProxyAddr)
 		}
-		fmt.Fprintf(os.Stderr, "rowtr: proxy started on %s (route mode; it keeps running after claude exits)\n", base)
-	} else {
+		if token != "" && !st.verified {
+			return fmt.Errorf("the listener on %s did not prove it holds %s — refusing to send traffic to it", cfg.ProxyAddr, tokenPath)
+		}
+		fmt.Fprintf(os.Stderr, "rowtr: proxy started on %s (%s mode; it keeps running after claude exits)\n", base, mode)
+	case !st.isRowtr:
+		return fmt.Errorf("port %s is in use by something that isn't a Rowtr proxy\n"+
+			"  stop it, or pick another port: export ROWTR_PROXY_ADDR=127.0.0.1:8790", cfg.ProxyAddr)
+	case token != "" && !st.verified:
+		return fmt.Errorf("something on %s answers like a Rowtr proxy but can't prove it holds %s\n"+
+			"  likely an old rowtr build (restart it: pkill rowtr && rowtr claude) or another user's process", cfg.ProxyAddr, tokenPath)
+	default:
+		if token == "" {
+			fmt.Fprintf(os.Stderr, "rowtr: running proxy predates client auth — restart it when convenient: pkill rowtr && rowtr claude\n")
+		}
 		fmt.Fprintf(os.Stderr, "rowtr: using running proxy on %s\n", base)
+		if st.mode != "" && st.mode != mode {
+			fmt.Fprintf(os.Stderr, "rowtr: note — the running proxy is in %s mode, not %s; switch with: pkill rowtr && rowtr claude\n", st.mode, mode)
+		}
 	}
 
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return fmt.Errorf("claude not found in PATH — install Claude Code first")
 	}
+	env := append(os.Environ(), "ANTHROPIC_BASE_URL="+base)
+	if token != "" {
+		hdr := proxy.AuthHeader + ": " + token
+		if existing := os.Getenv("ANTHROPIC_CUSTOM_HEADERS"); existing != "" {
+			hdr = existing + "\n" + hdr
+		}
+		env = append(env, "ANTHROPIC_CUSTOM_HEADERS="+hdr)
+	}
 	cmd := exec.Command(claudePath, args...)
-	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+base)
+	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
+
+	start := time.Now()
+	runErr := cmd.Run()
+	printSessionSummary(start, mode)
+	if runErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(runErr, &exitErr) {
 			os.Exit(exitErr.ExitCode()) // propagate claude's exit code
 		}
-		return err
+		return runErr
 	}
 	return nil
 }
 
-// proxyHealthy reports whether base answers as a Rowtr proxy (not just any server).
-func proxyHealthy(base string) bool {
-	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(base + "/rowtr/health")
+// persistProxyMode saves the routing choice on top of the file config only —
+// never the env-resolved one, so one-off overrides don't get baked in.
+func persistProxyMode(mode string) {
+	fc := config.LoadFile()
+	fc.ProxyMode = mode
+	if _, err := config.Save(fc); err != nil {
+		fmt.Fprintf(os.Stderr, "rowtr: couldn't persist mode choice: %v\n", err)
+	}
+}
+
+// askRoutingConsent is the first-run routing opt-in: local offload only starts
+// after the user says yes, and the choice is persisted. Non-interactive runs
+// default to observe (log-only) without persisting anything.
+func askRoutingConsent(cfg config.Config) string {
+	if fi, err := os.Stdin.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		fmt.Fprintln(os.Stderr, "rowtr: no routing choice on record — using observe mode (log-only); opt in with `rowtr claude --route`")
+		return "observe"
+	}
+	fmt.Fprintf(os.Stderr, "rowtr can answer simple, tool-free prompts with your local model (%s)\n"+
+		"instead of Claude, keeping them off your Claude quota. Anything that needs\n"+
+		"Claude — tools, reasoning, ambiguous asks — still goes to Claude.\n", cfg.LocalModel)
+	fmt.Fprint(os.Stderr, "Route eligible prompts to the local model? [Y/n] ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {
-		return false
+		// stdin looked like a terminal but produced no input (/dev/null, EOF):
+		// silence is not consent — observe, and leave the question open.
+		fmt.Fprintln(os.Stderr, "\nrowtr: no answer — using observe mode (log-only); opt in with `rowtr claude --route`")
+		return "observe"
+	}
+	mode := "route"
+	switch strings.TrimSpace(strings.ToLower(line)) {
+	case "", "y", "yes":
+	default:
+		mode = "observe"
+		fmt.Fprintln(os.Stderr, "rowtr: observe mode — everything goes to Claude; routing is logged, not enforced (`rowtr claude --route` to change)")
+	}
+	persistProxyMode(mode)
+	return mode
+}
+
+// printSessionSummary discloses what the proxy did with this session's traffic
+// — the offload is invisible inside Claude Code, so it's stated where the user
+// actually looks.
+func printSessionSummary(since time.Time, mode string) {
+	p, err := config.UsagePath()
+	if err != nil {
+		return
+	}
+	st, err := usage.Open(p)
+	if err != nil {
+		return
+	}
+	defer st.Close()
+	sum, err := st.SummarySince(since)
+	if err != nil {
+		return
+	}
+	switch {
+	case sum.Local > 0:
+		model := ""
+		for _, m := range sum.ByModel {
+			if m.Tier == "local" {
+				model = m.Model
+				break
+			}
+		}
+		fmt.Fprintf(os.Stderr, "rowtr: this session — %d request(s) · %d tokens answered locally by %s (kept off Claude)\n",
+			sum.Local, sum.LocalTokens, model)
+	case mode == "observe":
+		fmt.Fprintln(os.Stderr, "rowtr: observe mode — everything went to Claude; opt into local routing with `rowtr claude --route`")
+	default:
+		fmt.Fprintln(os.Stderr, "rowtr: nothing was answered locally this session")
+	}
+}
+
+type proxyStatus struct {
+	responding bool
+	isRowtr    bool
+	verified   bool // listener proved it holds the local token file
+	mode       string
+}
+
+// probeProxy challenges base's health endpoint with a nonce. `verified` means
+// the listener answered with a valid HMAC over the nonce, i.e. it can read the
+// same user-private token file we can — not merely that it mimics the JSON.
+func probeProxy(base, token string) proxyStatus {
+	var st proxyStatus
+	nonce := randomNonce()
+	req, err := http.NewRequest(http.MethodGet, base+"/rowtr/health?nonce="+nonce, nil)
+	if err != nil {
+		return st
+	}
+	if token != "" {
+		req.Header.Set(proxy.AuthHeader, token)
+	}
+	resp, err := (&http.Client{Timeout: 1 * time.Second}).Do(req)
+	if err != nil {
+		return st
 	}
 	defer resp.Body.Close()
+	st.responding = true
 	var body struct {
 		Service string `json:"service"`
+		Proof   string `json:"proof"`
+		Mode    string `json:"mode"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&body) != nil {
-		return false
+		return st
 	}
-	return body.Service == "rowtr"
+	st.isRowtr = body.Service == "rowtr"
+	st.mode = body.Mode
+	st.verified = token != "" && body.Proof == proxy.HealthProof(token, nonce)
+	return st
+}
+
+func readToken(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func randomNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 func portBusy(addr string) bool {
@@ -175,18 +355,26 @@ func portBusy(addr string) bool {
 	return true
 }
 
-// startProxyDetached re-execs this binary as `rowtr serve --mode route`,
-// detached, logging to proxy.log in the config dir.
-func startProxyDetached() error {
+// maxProxyLogBytes caps proxy.log: past this, the next start truncates it.
+const maxProxyLogBytes = 5 << 20
+
+// startProxyDetached re-execs this binary as `rowtr serve --mode <mode>`,
+// detached, logging to a user-private proxy.log in the config dir.
+func startProxyDetached(mode string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(self, "serve", "--mode", "route")
+	cmd := exec.Command(self, "serve", "--mode", mode)
 	if dir, derr := config.DataDir(); derr == nil {
 		if err := os.MkdirAll(dir, 0o755); err == nil {
-			if f, ferr := os.OpenFile(filepath.Join(dir, "proxy.log"),
-				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+			logPath := filepath.Join(dir, "proxy.log")
+			flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+			if info, serr := os.Stat(logPath); serr == nil && info.Size() > maxProxyLogBytes {
+				flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+			}
+			if f, ferr := os.OpenFile(logPath, flags, 0o600); ferr == nil {
+				_ = f.Chmod(0o600) // tighten a log created by an older build
 				cmd.Stdout, cmd.Stderr = f, f
 			}
 		}
@@ -200,13 +388,14 @@ func startProxyDetached() error {
 // runSetup runs the first-run system check and writes a config file.
 func runSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
-	yes := fs.Bool("yes", false, "accept recommendations without prompting")
+	yes := fs.Bool("yes", false, "accept recommendations without prompting (never installs or downloads by itself)")
 	pull := fs.Bool("pull", false, "run `ollama pull` for the recommended model")
+	install := fs.Bool("install", false, "install Ollama if it's missing")
 	probe := fs.Bool("probe", false, "make a minimal Claude API call to verify credentials")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return setup.Run(setup.Options{AssumeYes: *yes, Pull: *pull, Probe: *probe})
+	return setup.Run(setup.Options{AssumeYes: *yes, Pull: *pull, Install: *install, Probe: *probe})
 }
 
 // runScore runs the router over a labeled eval set and prints the scoreboard.
@@ -233,11 +422,16 @@ func runServe(args []string) error {
 	addr := fs.String("addr", config.Load().ProxyAddr, "listen address")
 	upstream := fs.String("upstream", "https://api.anthropic.com", "frontier upstream base URL")
 	mode := fs.String("mode", "observe", "observe (log only) | route (divert Local, tool-free requests to Ollama)")
+	noAuth := fs.Bool("no-auth", false, "don't require the "+proxy.AuthHeader+" header on /v1/messages")
+	unsafeRemote := fs.Bool("unsafe-remote", false, "allow a non-loopback listen address or a cleartext remote upstream")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *mode != string(proxy.ModeObserve) && *mode != string(proxy.ModeRoute) {
 		return fmt.Errorf("invalid --mode %q: want observe | route", *mode)
+	}
+	if err := checkAddrSafety(*addr, *upstream, *unsafeRemote); err != nil {
+		return err
 	}
 
 	cfg := config.Load()
@@ -256,19 +450,73 @@ func runServe(args []string) error {
 		}
 	}
 
-	srv, err := proxy.New(router.KeywordRouter{}, *upstream, local, proxy.Mode(*mode), store, logger)
+	var token string
+	if p, terr := config.TokenPath(); terr == nil {
+		if token, terr = proxy.LoadOrCreateToken(p); terr != nil {
+			logger.Printf("auth token unavailable (%v) — client auth disabled", terr)
+		}
+	}
+	requireAuth := !*noAuth && token != ""
+
+	srv, err := proxy.New(proxy.Options{
+		Router: router.KeywordRouter{}, Upstream: *upstream, Local: local,
+		Mode: proxy.Mode(*mode), Store: store, Log: logger,
+		Token: token, RequireAuth: requireAuth,
+		DebugIntent: os.Getenv("ROWTR_DEBUG_INTENT") == "1",
+	})
 	if err != nil {
 		return err
 	}
 
 	logger.Printf("proxy listening on http://%s  (upstream %s, mode %s)", *addr, *upstream, *mode)
-	logger.Printf("point a client at it:  export ANTHROPIC_BASE_URL=http://%s", *addr)
+	if requireAuth {
+		logger.Printf("client auth on — `rowtr claude` handles it; for a manual client:")
+		logger.Printf(`  export ANTHROPIC_BASE_URL=http://%s ANTHROPIC_CUSTOM_HEADERS="%s: %s"`, *addr, proxy.AuthHeader, token)
+	} else {
+		logger.Printf("point a client at it:  export ANTHROPIC_BASE_URL=http://%s", *addr)
+	}
 	if *mode == string(proxy.ModeObserve) {
 		logger.Printf("observe mode: every request forwarded unchanged; routing is logged, not enforced")
 	} else {
 		logger.Printf("route mode: Local + tool-free requests → Ollama (%s); everything else → frontier", cfg.LocalModel)
 	}
 	return http.ListenAndServe(*addr, srv.Handler())
+}
+
+// checkAddrSafety refuses configurations that would expose the proxy — it
+// speaks cleartext HTTP and forwards the user's Claude credentials — beyond
+// the machine, unless the user explicitly opts in.
+func checkAddrSafety(addr, upstream string, unsafeOK bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid listen address %q: %w", addr, err)
+	}
+	if !loopbackHost(host) {
+		if !unsafeOK {
+			return fmt.Errorf("refusing to listen on non-loopback %q — the proxy speaks cleartext HTTP and relays your Claude credentials\n"+
+				"  bind 127.0.0.1, or pass --unsafe-remote if you accept that", addr)
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: listening on %s — traffic to this proxy is unencrypted HTTP; anyone who can reach it can spend your Claude quota\n", addr)
+	}
+	u, err := url.Parse(upstream)
+	if err != nil {
+		return fmt.Errorf("invalid upstream %q: %w", upstream, err)
+	}
+	if u.Scheme == "http" && !loopbackHost(u.Hostname()) {
+		if !unsafeOK {
+			return fmt.Errorf("refusing cleartext upstream %q — credentials would cross the network unencrypted (use https://, or pass --unsafe-remote)", upstream)
+		}
+		fmt.Fprintf(os.Stderr, "WARNING: upstream %s is unencrypted HTTP to a remote host\n", upstream)
+	}
+	return nil
+}
+
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func run() error {
@@ -318,16 +566,53 @@ func run() error {
 	return nil
 }
 
-// readPrompt takes the prompt from CLI args (joined) or, failing that, stdin.
+// readPrompt takes the prompt from CLI args (joined) or, failing that, piped
+// stdin. With neither — an interactive terminal and no args — it prints usage
+// instead of blocking on a read the user can't see coming.
 func readPrompt(args []string) (string, error) {
 	if len(args) > 0 {
 		return strings.Join(args, " "), nil
+	}
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return "", fmt.Errorf("no prompt given\n" +
+			"  rowtr \"your prompt\"    route one prompt\n" +
+			"  rowtr claude           start Claude Code through the Rowtr proxy\n" +
+			"  rowtr setup            first-time setup\n" +
+			"  rowtr usage            show what's been kept off your Claude quota")
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return "", fmt.Errorf("reading stdin: %w", err)
 	}
 	return string(data), nil
+}
+
+// runWelcome greets a user who launched the binary from a file manager
+// (double-click on Windows): explain what Rowtr is, offer setup, and hold the
+// console open so it doesn't flash and vanish.
+func runWelcome() error {
+	fmt.Printf("Rowtr %s — an intelligent router for Claude Code\n\n", version)
+	fmt.Println("Rowtr is a command-line tool. Day to day you'll run it from a terminal:")
+	fmt.Println("  rowtr setup     first-time setup (checks Ollama, picks a local model)")
+	fmt.Println("  rowtr claude    start Claude Code with Rowtr in front of it")
+	fmt.Println("  rowtr usage     see what you've kept off your Claude quota")
+	fmt.Println()
+
+	in := bufio.NewReader(os.Stdin)
+	fmt.Print("Run first-time setup now? [Y/n] ")
+	line, _ := in.ReadString('\n')
+	var err error
+	switch strings.TrimSpace(strings.ToLower(line)) {
+	case "", "y", "yes":
+		fmt.Println()
+		err = setup.Run(setup.Options{})
+	}
+	if err != nil {
+		fmt.Println("setup error:", err)
+	}
+	fmt.Print("\nPress Enter to close this window… ")
+	_, _ = in.ReadString('\n')
+	return err
 }
 
 // parseTier maps the --tier flag to an optional forced tier (nil = auto/route).

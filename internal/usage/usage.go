@@ -93,7 +93,12 @@ type Summary struct {
 }
 
 // Summary aggregates all recorded events.
-func (s *Store) Summary() (Summary, error) {
+func (s *Store) Summary() (Summary, error) { return s.summarySince(0) }
+
+// SummarySince aggregates events recorded at or after t.
+func (s *Store) SummarySince(t time.Time) (Summary, error) { return s.summarySince(t.Unix()) }
+
+func (s *Store) summarySince(minTS int64) (Summary, error) {
 	var sum Summary
 	row := s.db.QueryRow(`SELECT
 		count(*),
@@ -102,13 +107,13 @@ func (s *Store) Summary() (Summary, error) {
 		coalesce(sum(CASE WHEN tier = 'local' THEN in_tokens + out_tokens ELSE 0 END), 0),
 		coalesce(sum(CASE WHEN tier = 'frontier' THEN in_tokens + out_tokens ELSE 0 END), 0),
 		coalesce(sum(saved_usd), 0)
-		FROM events`)
+		FROM events WHERE ts >= ?`, minTS)
 	if err := row.Scan(&sum.Total, &sum.Local, &sum.Frontier, &sum.LocalTokens, &sum.FrontierTokens, &sum.SavedUSD); err != nil {
 		return sum, err
 	}
 
 	rows, err := s.db.Query(`SELECT model, tier, count(*)
-		FROM events GROUP BY model, tier ORDER BY count(*) DESC`)
+		FROM events WHERE ts >= ? GROUP BY model, tier ORDER BY count(*) DESC`, minTS)
 	if err != nil {
 		return sum, err
 	}

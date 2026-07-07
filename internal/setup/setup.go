@@ -6,8 +6,10 @@ package setup
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,8 +23,9 @@ import (
 
 // Options controls the setup run.
 type Options struct {
-	AssumeYes bool // accept prompts non-interactively
+	AssumeYes bool // accept prompts non-interactively (never installs or downloads by itself)
 	Pull      bool // run `ollama pull` for the recommended model
+	Install   bool // install Ollama if it's missing
 	Probe     bool // make a minimal Claude API call to verify credentials
 }
 
@@ -189,11 +192,18 @@ func probeClaude(key, model string) error {
 // installs (with consent) if missing, then starts it. Returns the post-bootstrap state.
 func bootstrapOllama(in *bufio.Reader, opts Options, host string) (bool, []string) {
 	if !ollamaInstalled() {
-		if !confirm(in, opts, "Ollama isn't installed. Install it now?", true) {
-			fmt.Println("  skipped — install later from https://ollama.com/download")
+		// Running an installer must be an explicit choice: --install or an
+		// interactive yes. --yes alone deliberately does NOT trigger it —
+		// same consent pattern as the model pull.
+		wantInstall := opts.Install
+		if !wantInstall && !opts.AssumeYes {
+			wantInstall = confirm(in, opts, "Ollama isn't installed. Install it now?", true)
+		}
+		if !wantInstall {
+			fmt.Println("  skipped — rerun with --install, or get it from https://ollama.com/download")
 			return false, nil
 		}
-		if err := installOllama(); err != nil {
+		if err := installOllama(in, opts); err != nil {
 			fmt.Printf("  install failed: %v\n  install manually: https://ollama.com/download\n", err)
 			return false, nil
 		}
@@ -227,9 +237,10 @@ func ollamaInstalled() bool {
 	return false
 }
 
-// installOllama uses the platform's officially documented install method; where
-// no package manager exists it points at the download page instead of improvising.
-func installOllama() error {
+// installOllama uses the platform's officially documented install method.
+// brew and winget verify their packages; where no package manager exists it
+// points at the download page instead of improvising.
+func installOllama(in *bufio.Reader, opts Options) error {
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("brew"); err == nil {
@@ -237,7 +248,7 @@ func installOllama() error {
 		}
 		return fmt.Errorf("Homebrew not found — download the app from https://ollama.com/download")
 	case "linux":
-		return runVisible("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
+		return installOllamaLinux(in, opts)
 	case "windows":
 		if _, err := exec.LookPath("winget"); err == nil {
 			return runVisible("winget", "install", "-e", "--id", "Ollama.Ollama")
@@ -246,6 +257,39 @@ func installOllama() error {
 	default:
 		return fmt.Errorf("unsupported OS %s", runtime.GOOS)
 	}
+}
+
+// installOllamaLinux is Ollama's documented `curl | sh` install, but through a
+// file the user can see: download the script, print its path and SHA-256, then
+// run it — same result, inspectable beforehand and attributable afterwards.
+func installOllamaLinux(in *bufio.Reader, opts Options) error {
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get("https://ollama.com/install.sh")
+	if err != nil {
+		return fmt.Errorf("downloading install script: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("downloading install script: HTTP %d", resp.StatusCode)
+	}
+	script, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("downloading install script: %w", err)
+	}
+	f, err := os.CreateTemp("", "ollama-install-*.sh")
+	if err != nil {
+		return err
+	}
+	path := f.Name()
+	_, werr := f.Write(script)
+	f.Close()
+	if werr != nil {
+		return werr
+	}
+	fmt.Printf("  downloaded Ollama's official install script → %s\n  sha256: %x\n", path, sha256.Sum256(script))
+	if !opts.Install && !confirm(in, opts, "  run it now?", true) {
+		return fmt.Errorf("script left at %s — inspect and run it yourself: sh %s", path, path)
+	}
+	return runVisible("sh", path)
 }
 
 // startOllama launches the daemon detached so it outlives setup. On macOS the

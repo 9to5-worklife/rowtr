@@ -15,6 +15,9 @@ type Config struct {
 	LocalModel    string `json:"local_model"`
 	OllamaHost    string `json:"ollama_host"`
 	ProxyAddr     string `json:"proxy_addr"`
+	// ProxyMode is the user's routing consent for `rowtr claude`:
+	// "" (not yet asked) | "observe" | "route".
+	ProxyMode string `json:"proxy_mode,omitempty"`
 }
 
 // Built-in defaults.
@@ -62,6 +65,15 @@ func UsagePath() (string, error) {
 	return filepath.Join(d, "usage.db"), nil
 }
 
+// TokenPath is the proxy auth token location (user-private file, 0o600).
+func TokenPath() (string, error) {
+	d, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "proxy-token"), nil
+}
+
 // Load resolves configuration: defaults → config file → environment variables.
 func Load() Config {
 	cfg := Defaults()
@@ -74,7 +86,21 @@ func Load() Config {
 	cfg.LocalModel = env("ROWTR_LOCAL_MODEL", cfg.LocalModel)
 	cfg.OllamaHost = env("OLLAMA_HOST", cfg.OllamaHost)
 	cfg.ProxyAddr = env("ROWTR_PROXY_ADDR", cfg.ProxyAddr)
+	cfg.ProxyMode = env("ROWTR_PROXY_MODE", cfg.ProxyMode)
 	return cfg
+}
+
+// LoadFile returns only the persisted config, without the env overlay — the
+// right base when mutating one field and re-saving, so one-off environment
+// overrides never get baked into the file.
+func LoadFile() Config {
+	var c Config
+	if p, err := Path(); err == nil {
+		if fc, err := loadFile(p); err == nil {
+			c = fc
+		}
+	}
+	return c
 }
 
 // Save writes cfg to the config file, creating the directory. Returns the path.
@@ -119,6 +145,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.ProxyAddr != "" {
 		dst.ProxyAddr = src.ProxyAddr
+	}
+	if src.ProxyMode != "" {
+		dst.ProxyMode = src.ProxyMode
 	}
 }
 

@@ -33,26 +33,50 @@ const (
 	ModeRoute   Mode = "route"   // divert Local + tool-free requests to Ollama
 )
 
-// Server is the reverse proxy plus the local-offload path.
-type Server struct {
-	router   router.Router
-	upstream *url.URL
-	local    *backend.Ollama
-	mode     Mode
-	store    *usage.Store // may be nil (recording disabled)
-	log      *log.Logger
-	rp       *httputil.ReverseProxy
-	counter  atomic.Uint64
+// Options configures a proxy Server.
+type Options struct {
+	Router   router.Router
+	Upstream string // frontier base URL
+	Local    *backend.Ollama
+	Mode     Mode
+	Store    *usage.Store // may be nil (recording disabled)
+	Log      *log.Logger
+
+	// Token is the shared secret (see LoadOrCreateToken). It keys the health
+	// proof and, when RequireAuth is set, authenticates clients on /v1/messages.
+	Token       string
+	RequireAuth bool
+	// DebugIntent includes the extracted prompt text in routing log lines.
+	// Off by default: prompt fragments must not persist in logs.
+	DebugIntent bool
 }
 
-// New builds a proxy. upstream is the frontier base URL; local serves route-mode
-// offloads; store may be nil.
-func New(r router.Router, upstream string, local *backend.Ollama, mode Mode, store *usage.Store, logger *log.Logger) (*Server, error) {
-	u, err := url.Parse(upstream)
+// Server is the reverse proxy plus the local-offload path.
+type Server struct {
+	router      router.Router
+	upstream    *url.URL
+	local       *backend.Ollama
+	mode        Mode
+	store       *usage.Store
+	log         *log.Logger
+	token       string
+	requireAuth bool
+	debugIntent bool
+	rp          *httputil.ReverseProxy
+	counter     atomic.Uint64
+}
+
+// New builds a proxy.
+func New(opts Options) (*Server, error) {
+	u, err := url.Parse(opts.Upstream)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{router: r, upstream: u, local: local, mode: mode, store: store, log: logger}
+	s := &Server{
+		router: opts.Router, upstream: u, local: opts.Local, mode: opts.Mode,
+		store: opts.Store, log: opts.Log,
+		token: opts.Token, requireAuth: opts.RequireAuth, debugIntent: opts.DebugIntent,
+	}
 	s.rp = s.reverseProxy()
 	return s, nil
 }
@@ -79,6 +103,8 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 		// Strip Accept-Encoding so Go's transport handles gzip itself and the
 		// accounting tap (ModifyResponse) sees plaintext.
 		req.Header.Del("Accept-Encoding")
+		// The auth token is local-only — it must never reach the upstream.
+		req.Header.Del(AuthHeader)
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.Printf("upstream error: %v", err)
@@ -115,18 +141,42 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Served by Rowtr itself (never proxied) — lets `rowtr claude` tell a
-	// Rowtr proxy from something else on the port.
-	mux.HandleFunc("/rowtr/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"service":"rowtr","mode":%q}`, s.mode)
-	})
+	mux.HandleFunc("/rowtr/health", s.handleHealth)
 	mux.HandleFunc("/v1/messages", s.handleMessages)
 	mux.Handle("/", s.rp) // models, count_tokens, files, … pass straight through
 	return mux
 }
 
+// handleHealth is served by Rowtr itself (never proxied). Beyond liveness it
+// carries a challenge-response: a caller supplying ?nonce= gets an HMAC proof
+// that the listener holds the user-private token file, which is how
+// `rowtr claude` tells a real Rowtr proxy from a squatter on the port. The
+// mode is disclosed only to callers that themselves present the token.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]string{"service": "rowtr"}
+	if nonce := r.URL.Query().Get("nonce"); nonce != "" && s.token != "" {
+		resp["proof"] = HealthProof(s.token, nonce)
+	}
+	if s.token != "" && s.clientAuthed(r) {
+		resp["mode"] = string(s.mode)
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) clientAuthed(r *http.Request) bool {
+	return tokenEqual(r.Header.Get(AuthHeader), s.token)
+}
+
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	if s.requireAuth && !s.clientAuthed(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, `{"type":"error","error":{"type":"authentication_error","message":%q}}`,
+			"rowtr: missing or invalid "+AuthHeader+" header — launch via `rowtr claude`, or copy the header printed by `rowtr serve` (opt out with --no-auth)")
+		return
+	}
+
 	body := s.readAndRestore(r)
 	req, _ := parseRequest(body)
 	rawUser := lastUserText(req)
@@ -143,8 +193,14 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	out := router.Decide(s.router, rawUser, hasTools)
 	offload := s.mode == ModeRoute && s.local != nil && out.Offloadable
 
-	s.log.Printf("route=%s reason=%q tools=%v internal=%v stream=%v offload=%v model=%s intent=%q",
-		out.Tier, out.Reason, hasTools, out.Internal, req.Stream, offload, req.Model, truncate(out.Intent, 80))
+	// The log line carries routing signals only; prompt text stays out of the
+	// log file unless the user explicitly opts into a debug session.
+	line := fmt.Sprintf("route=%s reason=%q tools=%v internal=%v stream=%v offload=%v model=%s",
+		out.Tier, out.Reason, hasTools, out.Internal, req.Stream, offload, req.Model)
+	if s.debugIntent {
+		line += fmt.Sprintf(" intent=%q", truncate(out.Intent, 80))
+	}
+	s.log.Print(line)
 
 	if offload && s.serveLocal(w, r, req) {
 		return
@@ -277,22 +333,40 @@ func (s *Server) msgID() string {
 	return fmt.Sprintf("msg_rowtr_local_%d", s.counter.Add(1))
 }
 
-// readAndRestore reads the request body and restores it so the request can
-// still be forwarded intact.
+// maxInspectBytes caps how much of a request body is buffered for routing
+// inspection — comfortably above Anthropic's request-size limit, so hitting it
+// means the body isn't a routable prompt anyway.
+const maxInspectBytes = 64 << 20
+
+// readAndRestore reads the request body (up to maxInspectBytes) and restores
+// it so the request can still be forwarded intact. An oversized body returns
+// nil (skip inspection) but is forwarded untouched: what was read is stitched
+// back in front of the unread remainder.
 func (s *Server) readAndRestore(r *http.Request) []byte {
 	if r.Body == nil {
 		return nil
 	}
-	body, err := io.ReadAll(r.Body)
-	r.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxInspectBytes+1))
 	if err != nil {
 		s.log.Printf("read body: %v", err)
+		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewReader(nil))
 		return nil
 	}
+	if len(body) > maxInspectBytes {
+		s.log.Printf("request body exceeds %dMB — forwarding without inspection", maxInspectBytes>>20)
+		r.Body = readCloser{io.MultiReader(bytes.NewReader(body), r.Body), r.Body}
+		return nil
+	}
+	r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	return body
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 type anthropicRequest struct {
@@ -349,10 +423,12 @@ func extractText(raw json.RawMessage) string {
 	return ""
 }
 
+// truncate shortens s to at most n runes without splitting a UTF-8 sequence.
 func truncate(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(runes[:n]) + "…"
 }

@@ -87,6 +87,11 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 	rp.Director = func(req *http.Request) {
 		base(req)
 		req.Host = s.upstream.Host
+		// Drop the client's Accept-Encoding: Go's transport then negotiates
+		// gzip itself and transparently decompresses, so the accounting tap
+		// (ModifyResponse) sees plaintext. With the client's own header passed
+		// through, the tap would see compressed bytes and parse nothing.
+		req.Header.Del("Accept-Encoding")
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.Printf("upstream error: %v", err)
@@ -100,7 +105,8 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 		if s.store == nil || resp.Request == nil ||
 			resp.Request.Method != http.MethodPost ||
 			resp.Request.URL.Path != "/v1/messages" ||
-			resp.StatusCode != http.StatusOK {
+			resp.StatusCode != http.StatusOK ||
+			resp.Header.Get("Content-Encoding") != "" { // still compressed → can't parse
 			return nil
 		}
 		isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")

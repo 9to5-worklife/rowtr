@@ -190,12 +190,35 @@ outlives claude (feeds the tray). All docs/quickstarts now lead with `rowtr clau
 - Ship flow decided: private repo for source; hand the zip directly to 1–2
   friends; GitHub Releases (+GoReleaser, public releases-only repo) at ~5+ testers.
 
+## "Downloadable and just works" state (2026-07-06, late session)
+
+- User ran real traffic through the proxy: 83% offload rate, 1700 tok kept off
+  quota. Frontier accounting recorded the request but **model/tokens were empty →
+  gzip**: Claude Code sends Accept-Encoding, tap saw compressed bytes. FIXED:
+  Director now strips Accept-Encoding (Go transport transparently de-gzips) +
+  tap skips any still-encoded body. Release assets refreshed with the fix.
+  **User must restart their proxy** (`pkill rowtr; rowtr claude`) to pick it up;
+  then re-verify `rowtr usage` shows frontier tokens.
+- **`scripts/install.sh`** written & tested end-to-end against a local HTTP
+  server: OS/arch detect → download zip → install to PATH (+ Rowtr.app to
+  ~/Applications on mac). curl downloads carry no quarantine flag → no
+  Gatekeeper wall. Overrides: ROWTR_VERSION / ROWTR_INSTALL_DIR / ROWTR_BASE_URL.
+- **Why a raw download doesn't "just work" today:** (1) release lives on the
+  private repo — no public URL; (2) unsigned binaries → browser downloads hit
+  Gatekeeper/SmartScreen; (3) no PATH install from a bare zip. The install
+  script solves 2+3; solving 1 needs the public releases-only repo.
+- **DECISION (user): keep everything private for now** — no public releases repo
+  yet; keep hand-sending zips. The installer script points at
+  github.com/chouli12/rowtr-releases and activates the moment that public repo
+  is created + release uploaded. Real signing/notarization remains the eventual
+  fix for browser downloads.
+
 ## Roadmap / next steps
 
-1. **Exercise frontier accounting with real traffic:** user runs `rowtr claude`,
-   works normally, then `rowtr usage` should show real "Spent on Claude" tokens
-   and the %-of-tokens rate.
+1. **Re-verify frontier accounting** after the user restarts the proxy (gzip fix).
 1b. **Test the Ollama bootstrap on a bare machine** (friend's Windows/Linux box).
+1c. **When ready to go public:** create public `rowtr-releases` repo, upload the
+    zips + `scripts/install.sh`, and the curl one-liner goes live unchanged.
 2. **Tray polish:** proxy start/stop from the tray; a menu-bar icon; time windows
    (today / all-time).
 3. **Cross-platform tray:** needs cgo built on target — per-OS builds or CI.

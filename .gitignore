@@ -3,11 +3,29 @@
 /rowtr-tray
 /bin/
 /dist/
+cmd/rowtr/rowtr
+*.exe
+*.test
+coverage.out
+*.prof
+
+# Project memory / AI-session files — local only
+CLAUDE.md
+.claude/
 
 # Local logs / scratch
 *.log
 
-# OS noise
+# Secrets & local state — defense in depth (these live in the OS config dir,
+# but must never land in the repo even by accident)
+.env
+*.pem
+*.key
+proxy-token
+usage.db*
+
+# Editor / OS noise
 .DS_Store
-cmd/rowtr/rowtr
-CLAUDE.md
+.vscode/
+.idea/
+.zshrc

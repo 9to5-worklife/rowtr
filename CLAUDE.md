@@ -145,7 +145,14 @@ first build = setup (done); desktop app shape = **menu-bar/tray** (later).
 - Path when ready for testers beyond friends: private GitHub repo + GoReleaser
   (builds, checksums, Releases, Homebrew tap). Signing/notarization later.
 - NOTE: the project is **not a git repo yet** — init + private remote is a
-  sensible next step before wider distribution.
+  sensible next step before wider distribution. (Superseded — see below.)
+- **DECISION REVERSED (2026-07-09, user):** the source repo is now PUBLIC at
+  github.com/chouli12/rowtr under **PolyForm Noncommercial 1.0.0** (LICENSE at
+  root + packaging/LICENSE.txt): free noncommercial use/modification/sharing,
+  commercial rights reserved. Branch protection on main (PR required;
+  admins bypass so chouli12's direct pushes still work; collaborator schlangp
+  kept write access and must PR to main). History was scanned for secrets
+  before flipping — clean.
 
 ## Ollama bootstrap (added after "what if a user has no Ollama?")
 

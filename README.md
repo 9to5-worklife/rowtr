@@ -195,3 +195,8 @@ Release binaries are currently unsigned and hand-distributed. **If you didn't
 get the zip directly from someone you trust, build from source** (`go build
 ./cmd/rowtr`) — it's one command and removes the question entirely. Signed,
 notarized, CI-built releases come when distribution widens.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — you're free to use, modify, and
+share Rowtr for any noncommercial purpose. Commercial use requires permission.

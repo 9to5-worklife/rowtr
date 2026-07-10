@@ -18,23 +18,30 @@ type Config struct {
 	// ProxyMode is the user's routing consent for `rowtr claude`:
 	// "" (not yet asked) | "observe" | "route".
 	ProxyMode string `json:"proxy_mode,omitempty"`
+	// DownshiftModel is the cheap Claude model that serves internal-safe
+	// requests when the local model can't. "off" disables downshifting.
+	DownshiftModel string `json:"downshift_model,omitempty"`
+	// Cascade enables try-local-then-judge for tool-free prompts (route mode).
+	Cascade bool `json:"cascade,omitempty"`
 }
 
 // Built-in defaults.
 const (
-	DefaultFrontierModel = "claude-opus-4-8"
-	DefaultLocalModel    = "gemma3n:e2b"
-	DefaultOllamaHost    = "http://localhost:11434"
+	DefaultFrontierModel  = "claude-opus-4-8"
+	DefaultLocalModel     = "gemma3n:e2b"
+	DefaultOllamaHost     = "http://localhost:11434"
 	DefaultProxyAddr     = "127.0.0.1:8787"
+	DefaultDownshiftModel = "claude-haiku-4-5"
 )
 
 // Defaults returns the built-in configuration.
 func Defaults() Config {
 	return Config{
-		FrontierModel: DefaultFrontierModel,
-		LocalModel:    DefaultLocalModel,
-		OllamaHost:    DefaultOllamaHost,
-		ProxyAddr:     DefaultProxyAddr,
+		FrontierModel:  DefaultFrontierModel,
+		LocalModel:     DefaultLocalModel,
+		OllamaHost:     DefaultOllamaHost,
+		ProxyAddr:      DefaultProxyAddr,
+		DownshiftModel: DefaultDownshiftModel,
 	}
 }
 
@@ -87,6 +94,10 @@ func Load() Config {
 	cfg.OllamaHost = env("OLLAMA_HOST", cfg.OllamaHost)
 	cfg.ProxyAddr = env("ROWTR_PROXY_ADDR", cfg.ProxyAddr)
 	cfg.ProxyMode = env("ROWTR_PROXY_MODE", cfg.ProxyMode)
+	cfg.DownshiftModel = env("ROWTR_DOWNSHIFT_MODEL", cfg.DownshiftModel)
+	if os.Getenv("ROWTR_CASCADE") == "1" {
+		cfg.Cascade = true
+	}
 	return cfg
 }
 
@@ -149,6 +160,12 @@ func merge(dst *Config, src Config) {
 	if src.ProxyMode != "" {
 		dst.ProxyMode = src.ProxyMode
 	}
+	if src.DownshiftModel != "" {
+		dst.DownshiftModel = src.DownshiftModel
+	}
+	if src.Cascade {
+		dst.Cascade = true
+	}
 }
 
 func env(key, fallback string) string {
@@ -170,12 +187,27 @@ var prices = map[string]Price{
 	"claude-haiku-4-5": {InputPerM: 1.00, OutputPerM: 5.00},
 }
 
+// Prompt-cache pricing multipliers on the input rate (Anthropic, 5-minute TTL).
+const (
+	CacheReadMult  = 0.1
+	CacheWriteMult = 1.25
+)
+
 // EstimateCostUSD returns the estimated dollar cost of a completion. Unknown
 // models cost $0 — local models run on the user's own hardware by design.
 func EstimateCostUSD(model string, inputTokens, outputTokens int) float64 {
+	return EstimateCostUSDCached(model, inputTokens, 0, 0, outputTokens)
+}
+
+// EstimateCostUSDCached prices a completion with cache-aware input rates:
+// uncached input at 1×, cache reads at ~0.1×, cache writes at 1.25×.
+func EstimateCostUSDCached(model string, inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens int) float64 {
 	p, ok := prices[model]
 	if !ok {
 		return 0
 	}
-	return float64(inputTokens)/1e6*p.InputPerM + float64(outputTokens)/1e6*p.OutputPerM
+	in := float64(inputTokens) +
+		float64(cacheReadTokens)*CacheReadMult +
+		float64(cacheWriteTokens)*CacheWriteMult
+	return in/1e6*p.InputPerM + float64(outputTokens)/1e6*p.OutputPerM
 }

@@ -91,21 +91,47 @@ func runUsage(_ []string) error {
 
 	fmt.Println("Rowtr usage")
 	fmt.Printf("  Kept off Claude:  %d requests · %d tokens\n", sum.Local, sum.LocalTokens)
-	fmt.Printf("  Spent on Claude:  %d requests · %d tokens\n", sum.Frontier, sum.FrontierTokens)
+	fmt.Printf("  Spent on Claude:  %d requests · %d tokens processed\n", sum.Frontier, sum.FrontierProcessed())
+	if sum.CacheReadTokens > 0 || sum.CacheWriteTokens > 0 {
+		fmt.Printf("    prompt cache:   %.0f%% of input served from cache (%d read · %d written)\n",
+			100*sum.CacheHitRate(), sum.CacheReadTokens, sum.CacheWriteTokens)
+	}
 	fmt.Printf("  Offload rate:     %.0f%% of requests (%d/%d)", rate, sum.Local, sum.Total)
 	if allTok := sum.LocalTokens + sum.FrontierTokens; allTok > 0 && sum.FrontierTokens > 0 {
 		fmt.Printf(" · %.0f%% of tokens", 100*float64(sum.LocalTokens)/float64(allTok))
 	}
 	fmt.Println()
+	if len(sum.ByCategory) > 0 {
+		fmt.Println("\n  Claude tokens by category:")
+		total := 0
+		for _, c := range sum.ByCategory {
+			total += c.Tokens
+		}
+		for _, c := range sum.ByCategory {
+			share := 0.0
+			if total > 0 {
+				share = 100 * float64(c.Tokens) / float64(total)
+			}
+			fmt.Printf("    %-10s %3.0f%%  (%d requests · %d tokens)\n", c.Category, share, c.Count, c.Tokens)
+		}
+	}
 	if len(sum.ByModel) > 0 {
 		fmt.Println("\n  By model:")
 		for _, m := range sum.ByModel {
 			fmt.Printf("    %-24s %-11s %d\n", m.Model, "("+m.Tier+")", m.Count)
 		}
 	}
+	if sum.MaxPromptTokens > bloatedContextTokens {
+		fmt.Printf("\n  Largest context seen: %d tokens — long sessions resend it every turn;\n"+
+			"  /clear between tasks (or /compact) keeps turns cheap.\n", sum.MaxPromptTokens)
+	}
 	fmt.Printf("\n  Est. $ saved (API pricing only): $%.4f\n", sum.SavedUSD)
 	return nil
 }
+
+// bloatedContextTokens is where a conversation's resent-every-turn context is
+// worth flagging to the user.
+const bloatedContextTokens = 150_000
 
 // runClaude ensures a verified Rowtr proxy is running (starting one in the
 // background if needed), then launches Claude Code pointed at it with the auth
@@ -288,6 +314,13 @@ func printSessionSummary(since time.Time, mode string) {
 	default:
 		fmt.Fprintln(os.Stderr, "rowtr: nothing was answered locally this session")
 	}
+	if sum.CacheReadTokens > 0 {
+		fmt.Fprintf(os.Stderr, "rowtr: prompt cache served %.0f%% of this session's Claude input\n", 100*sum.CacheHitRate())
+	}
+	if sum.MaxPromptTokens > bloatedContextTokens {
+		fmt.Fprintf(os.Stderr, "rowtr: tip — context reached %d tokens and is resent every turn; /clear between tasks keeps turns cheap\n",
+			sum.MaxPromptTokens)
+	}
 }
 
 type proxyStatus struct {
@@ -424,6 +457,7 @@ func runServe(args []string) error {
 	mode := fs.String("mode", "observe", "observe (log only) | route (divert Local, tool-free requests to Ollama)")
 	noAuth := fs.Bool("no-auth", false, "don't require the "+proxy.AuthHeader+" header on /v1/messages")
 	unsafeRemote := fs.Bool("unsafe-remote", false, "allow a non-loopback listen address or a cleartext remote upstream")
+	cascade := fs.Bool("cascade", false, "try-local-then-judge for tool-free prompts (route mode; experimental)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -458,11 +492,17 @@ func runServe(args []string) error {
 	}
 	requireAuth := !*noAuth && token != ""
 
+	downshift := cfg.DownshiftModel
+	if downshift == "off" {
+		downshift = ""
+	}
 	srv, err := proxy.New(proxy.Options{
 		Router: router.KeywordRouter{}, Upstream: *upstream, Local: local,
 		Mode: proxy.Mode(*mode), Store: store, Log: logger,
 		Token: token, RequireAuth: requireAuth,
-		DebugIntent: os.Getenv("ROWTR_DEBUG_INTENT") == "1",
+		DebugIntent:    os.Getenv("ROWTR_DEBUG_INTENT") == "1",
+		DownshiftModel: downshift,
+		Cascade:        *cascade || cfg.Cascade,
 	})
 	if err != nil {
 		return err
@@ -479,6 +519,12 @@ func runServe(args []string) error {
 		logger.Printf("observe mode: every request forwarded unchanged; routing is logged, not enforced")
 	} else {
 		logger.Printf("route mode: Local + tool-free requests → Ollama (%s); everything else → frontier", cfg.LocalModel)
+		if downshift != "" {
+			logger.Printf("downshift: allowlisted housekeeping falls back to %s when the local model can't serve it", downshift)
+		}
+		if *cascade || cfg.Cascade {
+			logger.Printf("cascade ON: tool-free frontier prompts get one judged local attempt first")
+		}
 	}
 	return http.ListenAndServe(*addr, srv.Handler())
 }

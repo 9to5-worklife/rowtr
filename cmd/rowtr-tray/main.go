@@ -40,6 +40,8 @@ func onReady() {
 	mKept.Disable()
 	mRate := systray.AddMenuItem("Offload rate: —", "Share of requests handled locally")
 	mRate.Disable()
+	mCache := systray.AddMenuItem("Prompt cache: —", "Share of Claude input served from Anthropic's prompt cache (~10× cheaper)")
+	mCache.Disable()
 
 	systray.AddSeparator()
 	header := systray.AddMenuItem("By model", "Requests directed to each model")
@@ -61,7 +63,7 @@ func onReady() {
 
 	go func() {
 		for {
-			refresh(mKept, mRate, mMoney, modelItems)
+			refresh(mKept, mRate, mCache, mMoney, modelItems)
 			time.Sleep(3 * time.Second)
 		}
 	}()
@@ -71,7 +73,7 @@ func onReady() {
 	}()
 }
 
-func refresh(mKept, mRate, mMoney *systray.MenuItem, modelItems []*systray.MenuItem) {
+func refresh(mKept, mRate, mCache, mMoney *systray.MenuItem, modelItems []*systray.MenuItem) {
 	if store == nil {
 		systray.SetTitle("Rowtr –")
 		mKept.SetTitle("Usage DB not found — run `rowtr serve` first")
@@ -95,6 +97,13 @@ func refresh(mKept, mRate, mMoney *systray.MenuItem, modelItems []*systray.MenuI
 		rateLine += fmt.Sprintf(" · %.0f%% of tokens", 100*float64(sum.LocalTokens)/float64(allTok))
 	}
 	mRate.SetTitle(rateLine)
+	if sum.CacheReadTokens > 0 || sum.CacheWriteTokens > 0 {
+		mCache.SetTitle(fmt.Sprintf("Prompt cache: %.0f%% of Claude input (%s read)",
+			100*sum.CacheHitRate(), humanTokens(sum.CacheReadTokens)))
+		mCache.Show()
+	} else {
+		mCache.SetTitle("Prompt cache: no data yet")
+	}
 	mMoney.SetTitle(fmt.Sprintf("Est. $ saved (API pricing): $%.4f", sum.SavedUSD))
 
 	for i, it := range modelItems {

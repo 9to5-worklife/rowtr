@@ -269,6 +269,59 @@ takes the struct now), `proxy.LoadOrCreateToken`/`HealthProof`/`AuthHeader`,
 `config.TokenPath`/`LoadFile`/`Config.ProxyMode`, `usage.SummarySince`,
 `internal/proxy/proxy_test.go` (auth/health/truncate coverage).
 
+## Token-reduction batch (2026-07-09) — "do them all"
+
+Implemented the full frontier-token-reduction menu in one pass (all unit-tested;
+allowlist/dedup verified live; evals 29/29):
+
+1. **Cache-aware accounting:** the tap now parses `cache_read_input_tokens` /
+   `cache_creation_input_tokens` (SSE + JSON); usage store gained
+   `cache_read_tokens`/`cache_write_tokens`/`category` columns (ALTER TABLE
+   migration, duplicate-column tolerated). `EstimateCostUSDCached` prices reads
+   at 0.1×, writes 1.25×. `rowtr usage`/tray/session summary show "tokens
+   processed" + cache hit rate. NOTE: "Spent on Claude" previously undercounted
+   (input_tokens is only the uncached remainder).
+2. **Per-category breakdown:** every request classified `internal`/`agent`/
+   `chat` (categorize() in proxy), carried to the tap via request context;
+   `rowtr usage` prints Claude tokens by category. Old rows show "unknown".
+3. **Safe-internal allowlist:** `router/intent.go` markers now carry kinds;
+   `topic`/`title`/`suggestion` are allowlisted → Outcome{Internal:true,
+   Offloadable:true, Reason:"internal:<kind> (allowlisted housekeeping)"}.
+   Web/transcript/search/verifier/extractor/command/notification stay frontier.
+4. **Downshift fallback (route mode):** allowlisted housekeeping that can't go
+   local is rewritten to `cfg.DownshiftModel` (default claude-haiku-4-5, "off"
+   disables, env ROWTR_DOWNSHIFT_MODEL). downshiftBody mutates ONLY model /
+   thinking (stripped — Haiku has no adaptive) / output_config.effort
+   (unsupported on Haiku) / max_tokens>64k. Savings = requested-model cost −
+   actual, recorded via ctxRequestedModel.
+5. **Dedup replay:** identical (sha256 of body) non-streaming allowlisted
+   requests within 5min replay from an in-memory cache (128 entries) — both
+   locally-served and frontier responses (captured via tap onBody). Response
+   header X-Rowtr-Tier: cache; recorded as local tier, model "cache:<model>".
+6. **Cascade (Slice 3 mechanism, default OFF):** `serve --cascade` or config
+   `cascade`/ROWTR_CASCADE=1. Tool-free non-internal frontier prompts ≤32KB get
+   one local completion + local self-judge ("score 0-10, integer only",
+   threshold 7); pass → served with X-Rowtr-Cascade-Score, fail/error →
+   escalate cleanly (nothing written before decision). Needs quality
+   measurement before defaulting on.
+7. **Context-bloat advisor:** Summary.MaxPromptTokens (max in+read+write);
+   `rowtr usage` + `rowtr claude` exit summary print a /clear tip past 150k.
+8. **Cache-protection tests:** TestByteIdenticalForwarding (normal traffic is
+   forwarded byte-identical) and TestDownshiftMutationScope (mutations touch
+   nothing beyond model/thinking/effort) in features_test.go, plus dedup,
+   cascade (both verdicts), and SSE cache-field tests.
+
+Surface changes: proxy.Options{DownshiftModel, Cascade}; Outcome.Kind;
+usage.Event{Category, CacheReadTokens, CacheWriteTokens}, Summary{FrontierInput,
+CacheReadTokens, CacheWriteTokens, MaxPromptTokens, ByCategory,
+FrontierProcessed(), CacheHitRate()}; config{DownshiftModel, Cascade,
+EstimateCostUSDCached}. Old eval label updated: suggestion mode is now
+deliberately offloadable. **User must restart the proxy (fresh terminal:
+`pkill rowtr && rowtr claude`) to activate; tray needs `make app` rebuild for
+the cache line.** Design guardrail carried throughout: real conversation turns
+are NEVER mutated (prompt caches are per-model; a mid-conversation model switch
+pays full cold input on the whole resent context).
+
 ## Roadmap / next steps
 
 1. **User restarts the proxy** (`pkill rowtr && rowtr claude`) — picks up gzip

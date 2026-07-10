@@ -8,6 +8,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -49,21 +51,29 @@ type Options struct {
 	// DebugIntent includes the extracted prompt text in routing log lines.
 	// Off by default: prompt fragments must not persist in logs.
 	DebugIntent bool
+	// DownshiftModel serves allowlisted-internal requests that can't go local
+	// on a cheaper Claude model. Empty disables downshifting.
+	DownshiftModel string
+	// Cascade enables try-local-then-judge for tool-free frontier prompts.
+	Cascade bool
 }
 
 // Server is the reverse proxy plus the local-offload path.
 type Server struct {
-	router      router.Router
-	upstream    *url.URL
-	local       *backend.Ollama
-	mode        Mode
-	store       *usage.Store
-	log         *log.Logger
-	token       string
-	requireAuth bool
-	debugIntent bool
-	rp          *httputil.ReverseProxy
-	counter     atomic.Uint64
+	router         router.Router
+	upstream       *url.URL
+	local          *backend.Ollama
+	mode           Mode
+	store          *usage.Store
+	log            *log.Logger
+	token          string
+	requireAuth    bool
+	debugIntent    bool
+	downshiftModel string
+	cascade        bool
+	dedup          *dedupCache
+	rp             *httputil.ReverseProxy
+	counter        atomic.Uint64
 }
 
 // New builds a proxy.
@@ -76,9 +86,32 @@ func New(opts Options) (*Server, error) {
 		router: opts.Router, upstream: u, local: opts.Local, mode: opts.Mode,
 		store: opts.Store, log: opts.Log,
 		token: opts.Token, requireAuth: opts.RequireAuth, debugIntent: opts.DebugIntent,
+		downshiftModel: opts.DownshiftModel, cascade: opts.Cascade,
+		dedup: newDedupCache(),
 	}
 	s.rp = s.reverseProxy()
 	return s, nil
+}
+
+// Request-scoped values handed from handleMessages to the accounting tap.
+type ctxKey int
+
+const (
+	ctxCategory ctxKey = iota
+	ctxRequestedModel
+	ctxDedupKey
+)
+
+// categorize buckets a request for the per-category spend breakdown.
+func categorize(out router.Outcome, hasTools bool) string {
+	switch {
+	case out.Internal:
+		return "internal"
+	case hasTools:
+		return "agent"
+	default:
+		return "chat"
+	}
 }
 
 // record persists a usage event; a nil store or write error is tolerated.
@@ -112,30 +145,74 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 	}
 
 	// Frontier token accounting: tap successful /v1/messages responses and
-	// record the real usage Anthropic reports (SSE or JSON).
+	// record the real usage Anthropic reports (SSE or JSON), including the
+	// prompt-cache split. Dedup-eligible responses are also captured for replay.
 	rp.ModifyResponse = func(resp *http.Response) error {
-		if s.store == nil || resp.Request == nil ||
+		if resp.Request == nil ||
 			resp.Request.Method != http.MethodPost ||
 			resp.Request.URL.Path != "/v1/messages" ||
 			resp.StatusCode != http.StatusOK ||
 			resp.Header.Get("Content-Encoding") != "" { // still compressed → can't parse
 			return nil
 		}
+		ctx := resp.Request.Context()
+		category, _ := ctx.Value(ctxCategory).(string)
+		reqModel, _ := ctx.Value(ctxRequestedModel).(string)
+		dkey, wantDedup := ctx.Value(ctxDedupKey).([32]byte)
+		if s.store == nil && !wantDedup {
+			return nil
+		}
+
 		isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
-		resp.Body = &frontierTap{inner: resp.Body, isSSE: isSSE,
-			done: func(model string, inTok, outTok int) {
+		var capturedBody []byte
+		var onBody func([]byte)
+		if wantDedup && !isSSE {
+			onBody = func(b []byte) { capturedBody = append([]byte(nil), b...) }
+		}
+		resp.Body = &frontierTap{inner: resp.Body, isSSE: isSSE, onBody: onBody,
+			done: func(model string, u tapUsage) {
+				if capturedBody != nil {
+					s.dedup.put(dkey, dedupEntry{body: capturedBody, model: model, inTok: u.InTok, outTok: u.OutTok})
+				}
+				if s.store == nil {
+					return
+				}
+				cost := config.EstimateCostUSDCached(model, u.InTok, u.CacheRead, u.CacheWrite, u.OutTok)
+				saved := 0.0
+				if reqModel != "" && reqModel != model { // downshifted — savings vs the requested model
+					if d := config.EstimateCostUSDCached(reqModel, u.InTok, u.CacheRead, u.CacheWrite, u.OutTok) - cost; d > 0 {
+						saved = d
+					}
+				}
 				s.record(usage.Event{
-					Time:         time.Now(),
-					Tier:         "frontier",
-					Model:        model,
-					InputTokens:  inTok,
-					OutputTokens: outTok,
-					CostUSD:      config.EstimateCostUSD(model, inTok, outTok),
+					Time:             time.Now(),
+					Tier:             "frontier",
+					Model:            model,
+					Category:         category,
+					InputTokens:      u.InTok,
+					CacheReadTokens:  u.CacheRead,
+					CacheWriteTokens: u.CacheWrite,
+					OutputTokens:     u.OutTok,
+					CostUSD:          cost,
+					SavedUSD:         saved,
 				})
 			}}
 		return nil
 	}
 	return rp
+}
+
+// forward hands the request to the reverse proxy with accounting context
+// attached so the response tap can classify and attribute what comes back.
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, category, requestedModel string, dkey [32]byte, canDedup bool) {
+	ctx := context.WithValue(r.Context(), ctxCategory, category)
+	if requestedModel != "" {
+		ctx = context.WithValue(ctx, ctxRequestedModel, requestedModel)
+	}
+	if canDedup {
+		ctx = context.WithValue(ctx, ctxDedupKey, dkey)
+	}
+	s.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // Handler returns the HTTP handler.
@@ -182,7 +259,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	rawUser := lastUserText(req)
 
 	if strings.TrimSpace(rawUser) == "" {
-		s.rp.ServeHTTP(w, r)
+		s.forward(w, r, "other", "", [32]byte{}, false)
 		return
 	}
 
@@ -191,7 +268,11 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Decide routes on the extracted human intent, not raw payload text.
 	// Tool-bearing requests never offload — they need the frontier.
 	out := router.Decide(s.router, rawUser, hasTools)
+	category := categorize(out, hasTools)
 	offload := s.mode == ModeRoute && s.local != nil && out.Offloadable
+	// Allowlisted housekeeping is the only traffic ever eligible for dedup
+	// replay or model mutation — real turns are forwarded byte-identical.
+	standalone := s.mode == ModeRoute && out.Internal && out.Offloadable
 
 	// The log line carries routing signals only; prompt text stays out of the
 	// log file unless the user explicitly opts into a debug session.
@@ -202,68 +283,129 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Print(line)
 
-	if offload && s.serveLocal(w, r, req) {
+	var dkey [32]byte
+	canDedup := standalone && !req.Stream && len(body) > 0 && len(body) <= dedupMaxBody
+	if canDedup {
+		dkey = dedupKey(body)
+		if e, ok := s.dedup.get(dkey); ok {
+			s.log.Printf("dedup: replaying cached response (model %s)", e.model)
+			s.record(usage.Event{
+				Time: time.Now(), Tier: "local", Model: "cache:" + e.model, Category: category,
+				InputTokens: e.inTok, OutputTokens: e.outTok, Offloaded: true,
+				SavedUSD: config.EstimateCostUSD(req.Model, e.inTok, e.outTok),
+			})
+			w.Header().Set("X-Rowtr-Tier", "cache")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(e.body)
+			return
+		}
+	}
+
+	if offload && s.serveLocal(w, r, req, category, dkey, canDedup) {
 		return
 	}
 	if offload {
-		s.log.Printf("local offload failed — forwarding to frontier instead")
+		s.log.Printf("local offload failed — falling back")
 	}
+
+	// Housekeeping that couldn't be served locally still doesn't deserve the
+	// expensive model — rewrite it onto the downshift tier.
+	if standalone && s.downshiftModel != "" && req.Model != s.downshiftModel {
+		if nb, ok := downshiftBody(body, s.downshiftModel); ok {
+			r.Body = io.NopCloser(bytes.NewReader(nb))
+			r.ContentLength = int64(len(nb))
+			s.log.Printf("downshift: %s → %s", req.Model, s.downshiftModel)
+			s.forward(w, r, category, req.Model, dkey, canDedup)
+			return
+		}
+	}
+
+	// Cascade (opt-in): tool-free real prompts the router sent to the frontier
+	// get one local attempt, judged locally; a weak answer escalates cleanly.
+	if s.cascade && s.mode == ModeRoute && s.local != nil && !hasTools && !out.Internal &&
+		out.Intent != "" && out.Tier == router.Frontier && len(body) <= maxCascadeBody {
+		if s.serveCascade(w, r, req, out, category) {
+			return
+		}
+	}
+
 	// Frontier usage is recorded by the ModifyResponse tap, not here.
-	s.rp.ServeHTTP(w, r)
+	s.forward(w, r, category, "", dkey, canDedup)
 }
 
 // serveLocal runs the local completion and, on success, writes an Anthropic-
 // shaped response. On failure it returns false having written nothing, so the
-// caller can fall back to the frontier.
-func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropicRequest) bool {
-	if err := s.local.Available(r.Context()); err != nil {
-		s.log.Printf("ollama unavailable: %v", err)
+// caller can fall back.
+func (s *Server) serveLocal(w http.ResponseWriter, r *http.Request, req anthropicRequest, category string, dkey [32]byte, canDedup bool) bool {
+	resp, latencyMS, ok := s.completeLocal(r, req)
+	if !ok {
 		return false
 	}
+	s.emitLocal(w, req, resp, category, latencyMS, -1, canDedup, dkey)
+	return true
+}
 
+// completeLocal runs the full local completion BEFORE anything is written,
+// so failures fall back to the frontier cleanly — the client never breaks.
+func (s *Server) completeLocal(r *http.Request, req anthropicRequest) (backend.Response, int64, bool) {
+	if err := s.local.Available(r.Context()); err != nil {
+		s.log.Printf("ollama unavailable: %v", err)
+		return backend.Response{}, 0, false
+	}
 	system := extractText(req.System)
 	msgs := make([]backend.ChatMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		msgs = append(msgs, backend.ChatMessage{Role: m.Role, Content: extractText(m.Content)})
 	}
-
-	// Complete fully before writing anything — this keeps the frontier
-	// fallback clean.
 	start := time.Now()
 	resp, err := s.local.Chat(r.Context(), system, msgs)
 	if err != nil {
 		s.log.Printf("ollama completion failed: %v", err)
-		return false
+		return backend.Response{}, 0, false
 	}
-	latency := time.Since(start)
+	return resp, time.Since(start).Milliseconds(), true
+}
 
+// emitLocal records and writes a locally-served response. score >= 0 marks a
+// cascade-judged answer; canDedup stores non-streaming responses for replay.
+func (s *Server) emitLocal(w http.ResponseWriter, req anthropicRequest, resp backend.Response, category string, latencyMS int64, score int, canDedup bool, dkey [32]byte) {
 	// SavedUSD estimates what the requested frontier model would have charged
 	// for these token counts.
 	s.record(usage.Event{
 		Time:         time.Now(),
 		Tier:         "local",
 		Model:        resp.Model,
+		Category:     category,
 		InputTokens:  resp.InputTokens,
 		OutputTokens: resp.OutputTokens,
-		LatencyMS:    latency.Milliseconds(),
+		LatencyMS:    latencyMS,
 		Offloaded:    true,
 		SavedUSD:     config.EstimateCostUSD(req.Model, resp.InputTokens, resp.OutputTokens),
 	})
 
 	w.Header().Set("X-Rowtr-Tier", "local")
 	w.Header().Set("X-Rowtr-Model", resp.Model)
+	if score >= 0 {
+		w.Header().Set("X-Rowtr-Cascade-Score", strconv.Itoa(score))
+	}
 
 	if req.Stream {
 		s.writeSSE(w, req.Model, resp)
-	} else {
-		s.writeJSON(w, req.Model, resp)
+		return
 	}
-	return true
+	body := s.localMessageJSON(req.Model, resp)
+	if canDedup {
+		s.dedup.put(dkey, dedupEntry{body: body, model: resp.Model, inTok: resp.InputTokens, outTok: resp.OutputTokens})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
-// writeJSON emits a non-streaming Anthropic Message, echoing the requested
-// model string; the real backend is disclosed via the X-Rowtr-* headers.
-func (s *Server) writeJSON(w http.ResponseWriter, model string, resp backend.Response) {
+// localMessageJSON builds a non-streaming Anthropic Message, echoing the
+// requested model string; the real backend is disclosed via X-Rowtr-* headers.
+func (s *Server) localMessageJSON(model string, resp backend.Response) []byte {
 	out := map[string]any{
 		"id":            s.msgID(),
 		"type":          "message",
@@ -277,9 +419,8 @@ func (s *Server) writeJSON(w http.ResponseWriter, model string, resp backend.Res
 			"output_tokens": resp.OutputTokens,
 		},
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	b, _ := json.Marshal(out)
+	return b
 }
 
 // writeSSE emits the Anthropic streaming event sequence for a single text

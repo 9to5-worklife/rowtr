@@ -30,7 +30,16 @@
 {"prompt": " Web page content: --- RouteLLM: An Open-Source Framework for Cost-Effective LLM Routing ...", "tools": false, "offload": false}
 {"prompt": "Perform a web search for the query: LLM routing benchmark cost reduction latency", "tools": false, "offload": false}
 {"prompt": "<transcript>{\"user\":\"testing\"} {\"user\":\"go to this path\"}</transcript> tag this conversation", "tools": false, "offload": false}
-{"prompt": "[SUGGESTION MODE: Suggest what the user might naturally type next] plan the next step", "tools": false, "offload": false}
+{"prompt": "[SUGGESTION MODE: Suggest what the user might naturally type next] plan the next step", "tools": false, "offload": true, "note": "allowlisted housekeeping since the safe-internal allowlist"}
 {"prompt": "<command-name>/usage</command-name> <command-message>usage</command-message>", "tools": false, "offload": false}
 {"prompt": "<task-notification> <task-id>w1xu8qbel</task-id> </task-notification>", "tools": false, "offload": false}
 {"prompt": " Web page content: --- %PDF-1.5 extract the key claims about routing", "tools": false, "offload": false, "note": "PDF extraction leaked to local in the wild"}
+
+// Allowlisted internal housekeeping — safe to serve locally (added with the allowlist).
+{"prompt": "Analyze if this message indicates a new conversation topic. If it does, extract a 2-3 word title.", "tools": false, "offload": true, "note": "topic detection housekeeping"}
+{"prompt": "Please write a 5-10 word title for the following conversation:\n\nuser: how do I sort a list in python", "tools": false, "offload": true, "note": "title generation housekeeping"}
+{"prompt": "[suggestion mode] suggest what the user might type next", "tools": false, "offload": true, "note": "suggestion mode housekeeping"}
+{"prompt": "Analyze if this message indicates a new conversation topic.", "tools": true, "offload": false, "note": "allowlisted kind but tool-bearing — never offload"}
+// Unsafe internal machinery must stay frontier even with the allowlist.
+{"prompt": "Web page content: --- long article text --- summarize the key claims", "tools": false, "offload": false, "note": "web extraction stays frontier"}
+{"prompt": "You are an adversarial claim verifier. Check the claim below.", "tools": false, "offload": false, "note": "verifier sub-call stays frontier"}

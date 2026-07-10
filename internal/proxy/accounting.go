@@ -7,22 +7,31 @@ import (
 	"strings"
 )
 
+// tapUsage is the token accounting extracted from one frontier response.
+type tapUsage struct {
+	InTok      int // uncached, full-price input
+	CacheRead  int // input served from the prompt cache
+	CacheWrite int // input written to the prompt cache
+	OutTok     int
+}
+
 // frontierTap wraps an upstream response body and extracts token usage as
 // bytes stream through to the client. Anthropic reports usage in two shapes:
-// SSE (`message_start` carries model + input_tokens, `message_delta` the final
+// SSE (`message_start` carries model + input tokens, `message_delta` the final
 // output_tokens) or one JSON object with `model` and `usage`. On EOF or Close,
-// done() fires exactly once with whatever was found.
+// done() fires exactly once with whatever was found. For non-SSE bodies,
+// onBody (optional) fires alongside done() with the complete response bytes.
 type frontierTap struct {
-	inner io.ReadCloser
-	isSSE bool
-	done  func(model string, inTok, outTok int)
+	inner  io.ReadCloser
+	isSSE  bool
+	done   func(model string, u tapUsage)
+	onBody func(body []byte)
 
-	line   bytes.Buffer // current SSE line
-	body   bytes.Buffer // whole body (JSON mode only)
-	model  string
-	inTok  int
-	outTok int
-	fired  bool
+	line  bytes.Buffer // current SSE line
+	body  bytes.Buffer // whole body (JSON mode only)
+	model string
+	u     tapUsage
+	fired bool
 }
 
 const (
@@ -63,19 +72,21 @@ func (t *frontierTap) scanSSE(chunk []byte) {
 	}
 }
 
+type usageFields struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
 // sseEvent covers both usage-bearing SSE event shapes.
 type sseEvent struct {
 	Type    string `json:"type"`
 	Message struct {
-		Model string `json:"model"`
-		Usage struct {
-			InputTokens int `json:"input_tokens"`
-		} `json:"usage"`
+		Model string      `json:"model"`
+		Usage usageFields `json:"usage"`
 	} `json:"message"`
-	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+	Usage usageFields `json:"usage"`
 }
 
 func (t *frontierTap) handleLine(line string) {
@@ -93,15 +104,27 @@ func (t *frontierTap) handleLine(line string) {
 	switch ev.Type {
 	case "message_start":
 		t.model = ev.Message.Model
-		t.inTok = ev.Message.Usage.InputTokens
+		t.applyUsage(ev.Message.Usage)
 	case "message_delta":
 		// output_tokens is the cumulative final count; input may be restated.
-		if ev.Usage.OutputTokens > 0 {
-			t.outTok = ev.Usage.OutputTokens
-		}
-		if ev.Usage.InputTokens > 0 {
-			t.inTok = ev.Usage.InputTokens
-		}
+		t.applyUsage(ev.Usage)
+	}
+}
+
+// applyUsage merges a usage report, keeping the largest value seen per field —
+// message_delta restates finals, and zero never overwrites a real count.
+func (t *frontierTap) applyUsage(u usageFields) {
+	if u.InputTokens > t.u.InTok {
+		t.u.InTok = u.InputTokens
+	}
+	if u.OutputTokens > t.u.OutTok {
+		t.u.OutTok = u.OutputTokens
+	}
+	if u.CacheReadInputTokens > t.u.CacheRead {
+		t.u.CacheRead = u.CacheReadInputTokens
+	}
+	if u.CacheCreationInputTokens > t.u.CacheWrite {
+		t.u.CacheWrite = u.CacheCreationInputTokens
 	}
 }
 
@@ -113,19 +136,18 @@ func (t *frontierTap) fire() {
 
 	if !t.isSSE {
 		var msg struct {
-			Model string `json:"model"`
-			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
-			} `json:"usage"`
+			Model string      `json:"model"`
+			Usage usageFields `json:"usage"`
 		}
 		if json.Unmarshal(t.body.Bytes(), &msg) == nil {
 			t.model = msg.Model
-			t.inTok = msg.Usage.InputTokens
-			t.outTok = msg.Usage.OutputTokens
+			t.applyUsage(msg.Usage)
+		}
+		if t.onBody != nil && t.body.Len() > 0 && t.body.Len() < maxBodyBuf {
+			t.onBody(t.body.Bytes())
 		}
 	}
 	if t.done != nil {
-		t.done(t.model, t.inTok, t.outTok)
+		t.done(t.model, t.u)
 	}
 }

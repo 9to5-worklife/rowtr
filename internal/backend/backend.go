@@ -5,7 +5,7 @@ package backend
 import (
 	"context"
 
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // Response is the normalized result of a completion, regardless of provider.

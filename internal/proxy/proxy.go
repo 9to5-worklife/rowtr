@@ -21,10 +21,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/connorhoulihan/rowtr/internal/backend"
-	"github.com/connorhoulihan/rowtr/internal/config"
-	"github.com/connorhoulihan/rowtr/internal/router"
-	"github.com/connorhoulihan/rowtr/internal/usage"
+	"github.com/9to5-worklife/rowtr/internal/backend"
+	"github.com/9to5-worklife/rowtr/internal/config"
+	"github.com/9to5-worklife/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/usage"
 )
 
 // Mode controls whether the proxy diverts traffic or only observes.
@@ -56,6 +56,13 @@ type Options struct {
 	DownshiftModel string
 	// Cascade enables try-local-then-judge for tool-free frontier prompts.
 	Cascade bool
+	// Shadow runs an experimental second router on real human turns and logs
+	// how it compares to the authoritative one (see shadow.go). Nil disables.
+	Shadow router.Router
+	// ShadowLog receives one JSON line per shadow comparison. Disagreement
+	// lines include the prompt intent — callers must treat the destination as
+	// user-private (0o600 file).
+	ShadowLog io.Writer
 }
 
 // Server is the reverse proxy plus the local-offload path.
@@ -74,6 +81,7 @@ type Server struct {
 	dedup          *dedupCache
 	rp             *httputil.ReverseProxy
 	counter        atomic.Uint64
+	shadowState
 }
 
 // New builds a proxy.
@@ -88,6 +96,10 @@ func New(opts Options) (*Server, error) {
 		token: opts.Token, requireAuth: opts.RequireAuth, debugIntent: opts.DebugIntent,
 		downshiftModel: opts.DownshiftModel, cascade: opts.Cascade,
 		dedup: newDedupCache(),
+		shadowState: shadowState{
+			shadow: opts.Shadow, shadowLog: opts.ShadowLog,
+			shadowSem: make(chan struct{}, maxConcurrentShadows),
+		},
 	}
 	s.rp = s.reverseProxy()
 	return s, nil
@@ -282,6 +294,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		line += fmt.Sprintf(" intent=%q", truncate(out.Intent, 80))
 	}
 	s.log.Print(line)
+
+	// Shadow experiment: run the candidate router on real human turns only —
+	// internal payloads are routed by policy, not classification, so there is
+	// no decision for a model to second-guess.
+	if s.shadow != nil && !out.Internal && out.Intent != "" {
+		s.runShadow(out, hasTools)
+	}
 
 	var dkey [32]byte
 	canDedup := standalone && !req.Stream && len(body) > 0 && len(body) <= dedupMaxBody

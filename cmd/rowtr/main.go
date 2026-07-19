@@ -27,14 +27,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/connorhoulihan/rowtr/internal/backend"
-	"github.com/connorhoulihan/rowtr/internal/config"
-	"github.com/connorhoulihan/rowtr/internal/eval"
-	"github.com/connorhoulihan/rowtr/internal/pipeline"
-	"github.com/connorhoulihan/rowtr/internal/proxy"
-	"github.com/connorhoulihan/rowtr/internal/router"
-	"github.com/connorhoulihan/rowtr/internal/setup"
-	"github.com/connorhoulihan/rowtr/internal/usage"
+	"github.com/9to5-worklife/rowtr/internal/backend"
+	"github.com/9to5-worklife/rowtr/internal/config"
+	"github.com/9to5-worklife/rowtr/internal/eval"
+	"github.com/9to5-worklife/rowtr/internal/pipeline"
+	"github.com/9to5-worklife/rowtr/internal/proxy"
+	"github.com/9to5-worklife/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/setup"
+	"github.com/9to5-worklife/rowtr/internal/usage"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=...".
@@ -431,10 +431,13 @@ func runSetup(args []string) error {
 	return setup.Run(setup.Options{AssumeYes: *yes, Pull: *pull, Install: *install, Probe: *probe})
 }
 
-// runScore runs the router over a labeled eval set and prints the scoreboard.
+// runScore runs a router over a labeled eval set and prints the scoreboard.
+// --router both is the head-to-head: same cases, keyword vs model, plus the
+// list of cases where the two disagree.
 func runScore(args []string) error {
 	fs := flag.NewFlagSet("score", flag.ExitOnError)
 	evals := fs.String("evals", "evals/router.jsonl", "path to the eval JSONL file")
+	which := fs.String("router", "keyword", "router to score: keyword | model | both")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -442,8 +445,59 @@ func runScore(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(eval.Run(router.KeywordRouter{}, cases).String())
+
+	switch *which {
+	case "keyword":
+		fmt.Print(eval.Run(router.KeywordRouter{}, cases).String())
+	case "model":
+		fmt.Print(eval.Run(newModelRouter(config.Load()), cases).String())
+	case "both":
+		kw := eval.Run(router.KeywordRouter{}, cases)
+		md := eval.Run(newModelRouter(config.Load()), cases)
+		fmt.Printf("— keyword —\n%s\n— model —\n%s\n", kw.String(), md.String())
+		printRouterDisagreements(kw, md)
+	default:
+		return fmt.Errorf("invalid --router %q: want keyword | model | both", *which)
+	}
 	return nil
+}
+
+// newModelRouter builds the experimental classifier-backed router from config.
+// No Fallback: on the scoreboard and in shadow mode a broken classifier must
+// score as broken, not silently borrow the keyword answer.
+func newModelRouter(cfg config.Config) *router.ModelRouter {
+	return &router.ModelRouter{Host: cfg.RouterHost(), Model: cfg.RouterModel}
+}
+
+// printRouterDisagreements lists the cases the two routers routed differently —
+// exactly the cases the eval set needs more of.
+func printRouterDisagreements(kw, md eval.Report) {
+	var n int
+	for i := range kw.Results {
+		k, m := kw.Results[i], md.Results[i]
+		if k.GotOffload == m.GotOffload {
+			continue
+		}
+		if n == 0 {
+			fmt.Println("— disagreements —")
+		}
+		n++
+		fmt.Printf("  keyword=%-5v model=%-5v want=%-5v  %q\n      keyword: %s\n      model:   %s\n",
+			k.GotOffload, m.GotOffload, k.Case.Offload, snippet(k.Case.Prompt, 80),
+			k.Outcome.Reason, m.Outcome.Reason)
+	}
+	if n == 0 {
+		fmt.Println("— no disagreements: both routers made identical offload calls —")
+	}
+}
+
+func snippet(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // runServe starts the transparent Anthropic-compatible proxy.
@@ -458,6 +512,7 @@ func runServe(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "don't require the "+proxy.AuthHeader+" header on /v1/messages")
 	unsafeRemote := fs.Bool("unsafe-remote", false, "allow a non-loopback listen address or a cleartext remote upstream")
 	cascade := fs.Bool("cascade", false, "try-local-then-judge for tool-free prompts (route mode; experimental)")
+	shadow := fs.Bool("shadow", false, "run the model router alongside the keyword router and log comparisons (experimental)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -496,6 +551,25 @@ func runServe(args []string) error {
 	if downshift == "off" {
 		downshift = ""
 	}
+
+	// Shadow experiment: the model router rides along and gets compared; the
+	// keyword router stays authoritative. Disagreement lines carry prompt text
+	// (they're the labeling corpus), so the log file is user-private.
+	var shadowRouter router.Router
+	var shadowLog io.Writer
+	if *shadow || cfg.Shadow {
+		shadowRouter = newModelRouter(cfg)
+		if p, serr := config.ShadowPath(); serr == nil {
+			f, ferr := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if ferr != nil {
+				return fmt.Errorf("opening shadow log: %w", ferr)
+			}
+			defer f.Close()
+			shadowLog = f
+			logger.Printf("shadow router ON: %s @ %s — comparisons → %s", cfg.RouterModel, cfg.RouterHost(), p)
+		}
+	}
+
 	srv, err := proxy.New(proxy.Options{
 		Router: router.KeywordRouter{}, Upstream: *upstream, Local: local,
 		Mode: proxy.Mode(*mode), Store: store, Log: logger,
@@ -503,6 +577,8 @@ func runServe(args []string) error {
 		DebugIntent:    os.Getenv("ROWTR_DEBUG_INTENT") == "1",
 		DownshiftModel: downshift,
 		Cascade:        *cascade || cfg.Cascade,
+		Shadow:         shadowRouter,
+		ShadowLog:      shadowLog,
 	})
 	if err != nil {
 		return err

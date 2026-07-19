@@ -12,8 +12,8 @@ import (
 
 	"fyne.io/systray"
 
-	"github.com/connorhoulihan/rowtr/internal/config"
-	"github.com/connorhoulihan/rowtr/internal/usage"
+	"github.com/9to5-worklife/rowtr/internal/config"
+	"github.com/9to5-worklife/rowtr/internal/usage"
 )
 
 const modelSlots = 8 // fixed rows we fill/hide (systray items are created up front)

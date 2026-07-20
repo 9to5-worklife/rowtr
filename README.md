@@ -1,187 +1,294 @@
-# Rowtr
+<div align="center">
 
-An intelligent LLM router. Rowtr sits in front of two model tiers and decides,
-per request, which one should handle it — so you only pay the frontier-model
-"tax" when a task actually needs frontier-grade reasoning.
+<img src="docs/banner.svg" alt="Rowtr — the intelligent router in front of Claude Code" width="840">
 
-- **Local (Gatekeeper)** — cheap/fast, via [Ollama](https://ollama.com). Handles
-  the high-volume, low-complexity majority (summarize, define, classify, lookup).
-- **Frontier (Expert)** — powerful/expensive, via Anthropic's Claude. Reserved
-  for genuine reasoning, synthesis, tool use, and open-ended work.
-- **The Router** — inspects each prompt and picks a tier. Today it's a free
-  keyword heuristic; it gets smarter later, once we can *measure* that it helps.
+<br/>
+
+**Answer the easy prompts on your own machine. Keep Claude for the hard ones.**
+
+[![CI](https://github.com/9to5-worklife/rowtr/actions/workflows/smoke.yml/badge.svg)](https://github.com/9to5-worklife/rowtr/actions/workflows/smoke.yml)
+[![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![License](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-3b82f6)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-64748b)
+![Status](https://img.shields.io/badge/status-alpha-f59e0b)
+
+[Why Rowtr](#-why-rowtr) · [How it works](#-how-it-works) · [Quickstart](#-quickstart) · [Security](#-security-model) · [Contributing](CONTRIBUTING.md) · [Community](#-community)
+
+</div>
 
 ---
 
-## Getting started
+Rowtr is a small, local proxy that sits transparently in front of **Claude Code**. It
+inspects every request, and when a prompt is genuinely simple — summarize, define,
+classify, generate a commit message — it answers it with a cheap model running **on
+your own machine** via [Ollama](https://ollama.com). Everything that needs real
+reasoning, or uses tools, still goes to Claude, untouched.
+
+The result: you stretch your Claude quota further without giving up frontier quality,
+and Rowtr keeps the receipts — every request logs its tier, tokens, and estimated
+savings.
+
+- 🛡️ **Local (Gatekeeper)** — cheap/fast, on your hardware via Ollama. Handles the
+  high-volume, low-complexity majority.
+- 🧠 **Frontier (Expert)** — powerful/expensive, via Anthropic's Claude. Reserved for
+  reasoning, synthesis, and anything with tool use.
+- 🔀 **The Router** — inspects each prompt and picks a tier. Today it's a free keyword
+  heuristic; it only gets smarter once a scoreboard *proves* the added cost pays off.
+
+---
+
+## ✨ Why Rowtr
+
+Most LLM routers optimize **dollar cost** and route *between cloud providers* — your
+prompts still leave your machine, and still spend metered budget. Rowtr makes a
+different bet, built for the person paying a **flat Claude subscription**, where the
+thing that actually hurts is *running out of quota*.
+
+| | Optimizes for | Where prompts run | Best-fit user |
+|---|---|---|---|
+| OpenRouter / LiteLLM / Portkey | $ cost, model breadth, governance | Cloud providers | Teams billing per-token across many models |
+| RouteLLM / Not Diamond / Martian | Best model per query | Cloud providers | Builders embedding a routing brain |
+| Point Claude Code at Ollama | Free / offline | Fully local (replaces Claude) | Users OK with local-only quality |
+| **Rowtr** | **Claude quota kept + on-device privacy** | **Local for easy turns, Claude for hard ones** | **Flat-subscription Claude Code users** |
+
+**What sets Rowtr apart:**
+
+- **Quota conservation, not cost arbitrage.** The headline number is *tokens and
+  requests kept off your Claude quota* — what a flat-rate subscriber actually feels.
+- **Local-first & private for what it offloads.** Prompts Rowtr answers locally never
+  leave your machine. *(Scope: only the offloaded subset is local — anything that needs
+  Claude still goes to Anthropic, exactly as before.)*
+- **Additive, not a replacement.** Pointing Claude Code straight at Ollama trades away
+  frontier quality on hard tasks. Rowtr keeps Claude for real work and sheds only the
+  easy stuff, *per request*.
+- **Measurement-first & safe by default.** Every request logs tier/tokens/category. The
+  default is **observe mode** — log-only, nothing rerouted — until you explicitly
+  consent. Ambiguous or tool-bearing requests always go to Claude.
+- **Zero infrastructure.** One cgo-free binary writing to a local SQLite file. No
+  Postgres, no Redis, no account, no fee, no third party seeing your traffic.
+
+---
+
+## 🧭 How it works
+
+Two model tiers behind one interface, a proxy that decides per request, and a usage
+store that records every decision so you can measure it.
+
+<p align="center">
+  <img src="docs/architecture.svg" alt="Rowtr architecture — Router and Backend interfaces with the proxy.Server hub" width="900">
+</p>
+
+In **route mode**, a single `POST /v1/messages` flows through the proxy like this — the
+first branch that succeeds wins, and any local failure falls back to Claude cleanly, so
+the client never breaks:
+
+<p align="center">
+  <img src="docs/request-flow.svg" alt="Rowtr request flow — dedup, local offload, downshift, cascade, or frontier" width="960">
+</p>
+
+> **Intent-aware routing.** Rowtr routes on the *human's* prompt, not the raw last
+> message. It strips Claude Code's injected wrappers (`<system-reminder>`, transcripts,
+> slash-command tags) and flags agent-internal machinery (fetched web pages, "perform a
+> web search…", suggestion mode) so those are never offloaded — even when they contain
+> routing keywords.
+
+---
+
+## 🚀 Quickstart
 
 ### 1. Prerequisites
 
-- **Go 1.24+** — `go version`
-- **Ollama** (for the local tier) — install, start it, and pull a model:
-  ```bash
-  brew install ollama
-  ollama serve            # leave running (or use the Ollama.app)
-  ollama pull llama3.2    # the default local model
-  ```
-- **Anthropic API key** (for the frontier tier):
-  ```bash
-  export ANTHROPIC_API_KEY=sk-ant-...
-  ```
-
-Rowtr runs even if a backend is missing — it reports which one and how to fix it,
-and never silently reroutes (that would corrupt the metrics).
+- **Go 1.26+** — `go version`
+- **[Ollama](https://ollama.com)** for the local tier (`rowtr setup` can install it for you)
+- **Claude access** — either a Claude Code login (Rowtr forwards it, no key needed) or
+  `export ANTHROPIC_API_KEY=sk-ant-...`
 
 ### 2. Build
 
 ```bash
-cd /Users/chuck/Code/Rowtr
+git clone https://github.com/9to5-worklife/rowtr && cd rowtr
 go build -o rowtr ./cmd/rowtr      # produces ./rowtr — rebuild after code changes
 ```
 
-### 3. Run setup (recommended)
+> Release binaries and a one-line installer (`scripts/install.sh`) exist but are
+> hand-distributed for now — see [Trust & distribution](#-trust--distribution).
+> Building from source is one command and removes all doubt.
+
+### 3. Set up (recommended)
 
 ```bash
-./rowtr setup            # add --probe to test your Claude key, --pull to fetch the model
+./rowtr setup            # add --install to install Ollama, --pull to fetch the model, --probe to test your key
 ```
 
-`setup` checks your hardware and **recommends a local model** sized to your RAM,
-verifies Ollama is running, checks for working Claude access, and writes a config
-file (`~/Library/Application Support/rowtr/config.json` on macOS, `~/.config/rowtr/`
-on Linux) so you don't need env vars. Flags: `--yes`
-(non-interactive — never installs or downloads by itself), `--install` (install
-Ollama if missing), `--pull` (download the recommended model), `--probe` (make a
-tiny Claude call to confirm credentials work).
+`setup` checks your hardware, **recommends a local model sized to your RAM**, verifies
+Ollama and Claude access, and writes a config file so you don't need env vars
+(`~/Library/Application Support/rowtr/config.json` on macOS, `~/.config/rowtr/` on
+Linux). Hands-off bootstrap on a bare machine: `./rowtr setup --yes --install --pull`.
 
-> It can confirm Claude credentials *exist and work*, but can't tell a
-> subscription from an API key or report the tier. If you use Claude Code's login,
-> the proxy forwards it — no separate key needed.
+### 4. Run
 
-### 4. Configuration (env vars override the config file; all optional)
+```bash
+./rowtr claude                   # starts the proxy if needed, launches Claude Code wired to it
+./rowtr claude --resume          # extra args pass straight through to claude
+```
+
+That's it — use Claude Code exactly as before. On first run Rowtr asks once whether to
+route eligible prompts locally (until you consent, it stays in safe **observe** mode).
+
+---
+
+## 🛠️ Ways to run it
+
+<details>
+<summary><b>CLI — one prompt at a time</b></summary>
+
+```bash
+./rowtr "define entropy"                 # → routed local
+./rowtr "compare REST and gRPC"          # → routed frontier
+./rowtr --tier local "list 3 colors"     # force a tier
+./rowtr --json "summarize DNS"           # machine-readable output
+echo "translate hello to French" | ./rowtr
+```
+
+The answer prints to **stdout**; the routing line (tier · reason · model · latency ·
+tokens · cost) prints to **stderr**.
+</details>
+
+<details>
+<summary><b>Proxy — manual control</b></summary>
+
+```bash
+./rowtr serve                    # observe mode (default): forward all, log routing
+./rowtr serve --mode route       # route mode: divert Local + tool-free requests to Ollama
+# then, in another terminal:
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
+```
+
+- **observe** — 100% safe. Everything still goes to Claude; Rowtr just logs the tier
+  each prompt *would* take. Use it to measure real traffic first.
+- **route** — actually offloads Local + tool-free requests; everything else (including
+  every tool-using turn) still goes to Claude. Locally-served turns carry an
+  `X-Rowtr-Tier: local` response header.
+</details>
+
+<details>
+<summary><b>Scoreboard — measure the routing</b></summary>
+
+```bash
+./rowtr score                          # uses evals/router.jsonl
+./rowtr score --router both            # compare the keyword vs model router, list disagreements
+```
+
+Prints accuracy plus a confusion breakdown — **FP** = wrongly sent local (a quality
+risk), **FN** = a missed saving — and lists every mismatch with its reason. Grow the
+eval set from real traffic and treat accuracy as the number to beat before making the
+router fancier.
+</details>
+
+<details>
+<summary><b>Usage — see what you kept off quota</b></summary>
+
+```bash
+./rowtr usage                    # cross-platform stats: offload rate, tokens kept off quota, by-model
+```
+
+On macOS, `rowtr-tray` shows the same numbers in the menu bar
+(`go build -o rowtr-tray ./cmd/rowtr-tray`, needs cgo).
+</details>
+
+---
+
+## ⚙️ Configuration
+
+Config lives in the config file (written by `setup`); every value has an env override.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `ROWTR_LOCAL_MODEL` | `gemma3n:e2b` | Ollama model for the local tier |
 | `ROWTR_FRONTIER_MODEL` | `claude-opus-4-8` | Claude model for the frontier tier |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama daemon URL |
-| `ANTHROPIC_API_KEY` | — | Anthropic key (read by the SDK) |
+| `ANTHROPIC_API_KEY` | — | Anthropic key (read by the SDK; optional if using Claude Code login) |
+| `ROWTR_PROXY_ADDR` | `127.0.0.1:8787` | Proxy listen address (loopback only) |
+| `ROWTR_PROXY_MODE` | `observe` | `observe` or `route` |
+| `ROWTR_DOWNSHIFT_MODEL` | `claude-haiku-4-5` | Cheaper Claude tier for housekeeping (`off` to disable) |
+| `ROWTR_CASCADE` | `0` | Try-local-then-judge before frontier (experimental) |
+| `ROWTR_ROUTER_MODEL` | `gemma3:270m` | SLM classifier for the shadow/model router |
+| `ROWTR_ROUTER_OLLAMA_HOST` | — | Host for the router model (e.g. a Raspberry Pi) |
+| `ROWTR_SHADOW` | `0` | Run the model router in shadow mode alongside keyword |
 
-> Confirm your exact local model tag with `ollama list` and override
-> `ROWTR_LOCAL_MODEL` if it differs from the default.
-
----
-
-## Two ways to run it
-
-### A) CLI — one prompt at a time
-
-```bash
-./rowtr "define entropy"                 # → routed local
-./rowtr "compare REST and gRPC"          # → routed frontier (needs API key)
-./rowtr --tier local "list 3 colors"     # force a tier
-./rowtr --json "summarize DNS"           # machine-readable output
-echo "translate hello to French" | ./rowtr
-```
-
-The answer prints to **stdout**; the routing line (tier · reason · model ·
-latency · tokens · cost) prints to **stderr**.
-
-### B) Proxy — transparently in front of Claude Code
-
-The one-command way — starts the proxy (if not already running) and launches
-Claude Code already connected to it; extra args pass through:
-
-```bash
-./rowtr claude                   # instead of `claude`
-./rowtr claude --resume          # args pass through
-```
-
-Manual control, if you want to run the pieces yourself:
-
-```bash
-./rowtr serve                    # observe mode (default): forward all, log routing
-./rowtr serve --mode route       # route mode: divert Local + tool-free requests to Ollama
-# separate terminal:
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
-```
-
-- **observe** — 100% safe. Everything still goes to Claude; Rowtr just logs what
-  tier each prompt *would* route to. Use this to measure real traffic first.
-- **route** — actually offloads: requests the router marks Local *and* that carry
-  no tools go to Ollama; everything else (including all tool-using turns) still
-  goes to Claude. If the local tier can't serve a request for any reason, Rowtr
-  falls back to the frontier — the client never breaks.
-
-> Note: `ANTHROPIC_BASE_URL` is read at startup, so this can't reroute an
-> already-running session — launch a new client to test. Don't point your primary
-> Claude Code at `--mode route` until you've watched it behave in `observe` first.
-> Locally-served turns are tagged with `X-Rowtr-Tier: local` response headers.
+> Confirm your exact local model tag with `ollama list` and override `ROWTR_LOCAL_MODEL`
+> if it differs.
 
 ---
 
-### C) Scoreboard — measure the routing
+## 🎛️ Features
 
-The router decides per request whether to offload to local. `rowtr score` runs it
-over a labeled eval set and reports how often that decision is right:
+- **Local offload** of eligible, tool-free prompts, translated into Anthropic's
+  streaming + non-streaming response shape so the client can't tell.
+- **Downshift** — internal housekeeping that can't go fully local is rewritten onto a
+  cheaper Claude tier (Haiku) instead of Opus.
+- **Dedup replay** — identical housekeeping requests within a short window replay from an
+  in-memory cache.
+- **Cascade** *(opt-in)* — a FrugalGPT-style try-local-then-judge that escalates to
+  Claude only when the local answer scores too low. Off by default until its quality is
+  measured.
+- **Prompt-cache-aware accounting** — parses real cache read/write tokens so the
+  scoreboard reflects what Anthropic actually billed.
+- **Shadow mode** *(experimental)* — runs a tiny SLM classifier alongside the keyword
+  router without ever taking control, mining disagreements as labeling data.
 
-```bash
-./rowtr score                          # uses evals/router.jsonl
-./rowtr score --evals path/to/set.jsonl
+---
+
+## 🔒 Security model
+
+Rowtr is designed to sit in your credential path without becoming a liability. Highlights:
+
+- **Loopback only.** `serve` refuses non-local bind addresses and cleartext remote
+  upstreams.
+- **Mutual auth.** A 32-byte token (created `0600` in your config dir) plus an
+  HMAC-SHA256 health proof means `rowtr claude` will only trust a proxy that holds the
+  token file, and the proxy rejects `/v1/messages` calls that don't present it.
+- **Log hygiene.** Prompt text never lands in `proxy.log` (routing signals only, unless
+  you opt into `ROWTR_DEBUG_INTENT`); the log is `0600` and truncates past 5 MB.
+- **Explicit consent.** Local routing is opt-in and persisted — silence is never
+  treated as consent.
+
+Full details and how to report a vulnerability: **[SECURITY.md](SECURITY.md)**.
+
+---
+
+## 📊 What's exact vs estimated
+
+Honesty matters for a tool whose whole point is measurement:
+
+- **Exact:** token counts for local offloads and real frontier requests (parsed from
+  Anthropic's `usage`, including cache read/write splits).
+- **Estimated:** **saved $** = Claude's price × the tokens you kept off quota. It's a
+  counterfactual, not a bill. On a flat subscription the honest headline is *quota kept*
+  (tokens/requests), with dollars a secondary, hedged line.
+
+---
+
+## 🗂️ Project layout
+
 ```
-
-It prints accuracy plus a confusion breakdown — **FP** = wrongly sent to local (a
-quality risk), **FN** = a missed saving — and lists every mismatch with the reason,
-so failures are actionable. Grow `evals/router.jsonl` from real traffic and treat
-the accuracy as the number to beat before making the router fancier.
-
-> **Intent-aware routing:** Rowtr routes on the *human's* prompt, not the raw last
-> message. It strips Claude Code's injected wrappers (`<system-reminder>`,
-> `<transcript>`, slash-command tags) and flags agent-internal machinery (fetched
-> web pages, "Perform a web search…", suggestion mode) so those are never offloaded
-> — even if they contain routing keywords.
-
-### D) Menu-bar app — see your savings
-
-A macOS menu-bar app shows how much has been saved by serving requests locally,
-with a per-model breakdown, reading the usage the proxy records.
-
-```bash
-# one-time: fetch the two extra deps used by the store + tray
-go get modernc.org/sqlite fyne.io/systray && go mod tidy
-
-# build the tray (separate binary; uses native GUI APIs, so build on macOS)
-go build -o rowtr-tray ./cmd/rowtr-tray
-./rowtr-tray
-```
-
-Run `rowtr serve` (which records usage to the config dir — `~/Library/Application
-Support/rowtr/usage.db` on macOS), drive some traffic, and the menu bar shows
-`$X.XX saved`; the dropdown lists local vs Claude request counts and a per-model
-breakdown.
-
-> **What's exact vs estimated:** local offloads are recorded with real token counts,
-> and **saved $** is an estimate (Claude's price × those tokens). Frontier requests
-> are recorded as tier+model only (no token parsing yet), so "spent" isn't tracked —
-> saved is the honest headline number.
-
-## Layout
-
-```
-cmd/rowtr        CLI (one-shot + `setup` + `serve` proxy + `score` scoreboard)
-cmd/rowtr-tray   macOS menu-bar app showing saved-$ + per-model usage (cgo)
-internal/router  Router interface + keyword heuristic; Decide()/ExtractIntent()
-internal/backend Backend interface + Ollama and Anthropic implementations
-internal/pipeline route → dispatch → assemble Result with metrics (CLI path)
-internal/proxy   Anthropic-compatible reverse proxy + local-offload; records usage
+cmd/rowtr        CLI: one-shot + setup + serve (proxy) + score + usage + claude
+cmd/rowtr-tray   macOS menu-bar app showing usage kept off quota (cgo)
+internal/router  Router interface, keyword + model routers; Decide()/ExtractIntent()
+internal/backend Backend interface + Ollama (local) and Anthropic (frontier)
+internal/proxy   Anthropic-compatible reverse proxy: offload, downshift, dedup, cascade, shadow
 internal/usage   SQLite usage store (pure-Go modernc.org/sqlite)
 internal/eval    scoreboard: score the offload decision against a labeled set
 internal/setup   first-run system check, model recommendation, config file
 internal/sysinfo host detection (RAM/arch) for the model recommendation
 internal/config  defaults → config file → env; price table
+docs/            architecture + request-flow diagrams
 evals/           labeled eval cases (router.jsonl)
 ```
 
-## Develop
+---
+
+## 🧑‍💻 Develop
 
 ```bash
 go build ./...
@@ -189,14 +296,28 @@ go vet ./...
 go test ./...   # router decisions are covered by table-driven tests
 ```
 
-## Trust & distribution
+Contributions welcome — please read **[CONTRIBUTING.md](CONTRIBUTING.md)** first.
 
-Release binaries are currently unsigned and hand-distributed. **If you didn't
-get the zip directly from someone you trust, build from source** (`go build
-./cmd/rowtr`) — it's one command and removes the question entirely. Signed,
-notarized, CI-built releases come when distribution widens.
+---
 
-## License
+## 🤝 Trust & distribution
 
-[PolyForm Noncommercial 1.0.0](LICENSE) — you're free to use, modify, and
-share Rowtr for any noncommercial purpose. Commercial use requires permission.
+Release binaries are currently unsigned and hand-distributed. **If you didn't get a zip
+directly from someone you trust, build from source** (`go build ./cmd/rowtr`) — one
+command, no question. Signed, notarized, CI-built releases come when distribution widens.
+CI (GitHub Actions) builds and smoke-tests on macOS, Linux, and Windows on every push.
+
+---
+
+## 💬 Community
+
+- 🐦 **X / Twitter:** [@YOUR_HANDLE](https://x.com/YOUR_HANDLE) &nbsp;*(replace with your handle)*
+- 🐛 **Issues & ideas:** [GitHub Issues](https://github.com/9to5-worklife/rowtr/issues)
+- 🔒 **Security reports:** see [SECURITY.md](SECURITY.md)
+
+---
+
+## 📄 License
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — free to use, modify, and share for any
+**noncommercial** purpose. Commercial use requires permission.

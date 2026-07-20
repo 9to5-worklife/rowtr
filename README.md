@@ -311,7 +311,7 @@ CI (GitHub Actions) builds and smoke-tests on macOS, Linux, and Windows on every
 
 ## 💬 Community
 
-- 🐦 **X / Twitter:** [@YOUR_HANDLE](https://x.com/YOUR_HANDLE) &nbsp;*(replace with your handle)*
+- 🐦 **X / Twitter:** [@YOUR_HANDLE](https://x.com/ChuckGUYH) &nbsp;*(replace with your handle)*
 - 🐛 **Issues & ideas:** [GitHub Issues](https://github.com/9to5-worklife/rowtr/issues)
 - 🔒 **Security reports:** see [SECURITY.md](SECURITY.md)
 

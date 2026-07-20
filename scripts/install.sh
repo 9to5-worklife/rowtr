@@ -1,7 +1,7 @@
 #!/bin/sh
 # Rowtr installer — macOS & Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/chouli12/rowtr-releases/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/9to5-worklife/rowtr/main/scripts/install.sh | sh
 #
 # Downloads the right zip for this machine, installs `rowtr` into your PATH,
 # and (macOS) puts Rowtr.app in ~/Applications. curl downloads carry no
@@ -11,7 +11,7 @@
 set -eu
 
 VERSION="${ROWTR_VERSION:-0.1.0}"
-REPO="chouli12/rowtr-releases"
+REPO="9to5-worklife/rowtr"
 BASE="${ROWTR_BASE_URL:-https://github.com/$REPO/releases/download/v$VERSION}"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"

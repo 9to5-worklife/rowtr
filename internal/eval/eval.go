@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // Case is one labeled example. Offload is the ground truth: should Rowtr serve

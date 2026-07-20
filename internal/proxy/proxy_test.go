@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // newTestServer wires a proxy at a fake upstream that records what reaches it.

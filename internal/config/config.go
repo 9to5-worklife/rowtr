@@ -23,6 +23,15 @@ type Config struct {
 	DownshiftModel string `json:"downshift_model,omitempty"`
 	// Cascade enables try-local-then-judge for tool-free prompts (route mode).
 	Cascade bool `json:"cascade,omitempty"`
+	// RouterModel is the small classifier model the experimental model router
+	// asks for tier decisions (shadow mode / `rowtr score --router model`).
+	RouterModel string `json:"router_model,omitempty"`
+	// RouterOllamaHost is where that classifier lives (e.g. a Raspberry Pi:
+	// http://raspberrypi.local:11434). Empty falls back to OllamaHost.
+	RouterOllamaHost string `json:"router_ollama_host,omitempty"`
+	// Shadow runs the model router alongside the keyword router in the proxy,
+	// logging comparisons without affecting traffic.
+	Shadow bool `json:"shadow_router,omitempty"`
 }
 
 // Built-in defaults.
@@ -30,8 +39,9 @@ const (
 	DefaultFrontierModel  = "claude-opus-4-8"
 	DefaultLocalModel     = "gemma3n:e2b"
 	DefaultOllamaHost     = "http://localhost:11434"
-	DefaultProxyAddr     = "127.0.0.1:8787"
+	DefaultProxyAddr      = "127.0.0.1:8787"
 	DefaultDownshiftModel = "claude-haiku-4-5"
+	DefaultRouterModel    = "gemma3:270m"
 )
 
 // Defaults returns the built-in configuration.
@@ -42,6 +52,7 @@ func Defaults() Config {
 		OllamaHost:     DefaultOllamaHost,
 		ProxyAddr:      DefaultProxyAddr,
 		DownshiftModel: DefaultDownshiftModel,
+		RouterModel:    DefaultRouterModel,
 	}
 }
 
@@ -72,6 +83,25 @@ func UsagePath() (string, error) {
 	return filepath.Join(d, "usage.db"), nil
 }
 
+// ShadowPath is the shadow-router comparison log location. User-private:
+// disagreement lines carry prompt text (the labeling corpus).
+func ShadowPath() (string, error) {
+	d, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "shadow.jsonl"), nil
+}
+
+// RouterHost resolves where the classifier model lives: the dedicated
+// RouterOllamaHost if set (e.g. a Raspberry Pi), else the local-tier Ollama.
+func (c Config) RouterHost() string {
+	if c.RouterOllamaHost != "" {
+		return c.RouterOllamaHost
+	}
+	return c.OllamaHost
+}
+
 // TokenPath is the proxy auth token location (user-private file, 0o600).
 func TokenPath() (string, error) {
 	d, err := DataDir()
@@ -97,6 +127,11 @@ func Load() Config {
 	cfg.DownshiftModel = env("ROWTR_DOWNSHIFT_MODEL", cfg.DownshiftModel)
 	if os.Getenv("ROWTR_CASCADE") == "1" {
 		cfg.Cascade = true
+	}
+	cfg.RouterModel = env("ROWTR_ROUTER_MODEL", cfg.RouterModel)
+	cfg.RouterOllamaHost = env("ROWTR_ROUTER_OLLAMA_HOST", cfg.RouterOllamaHost)
+	if os.Getenv("ROWTR_SHADOW") == "1" {
+		cfg.Shadow = true
 	}
 	return cfg
 }
@@ -165,6 +200,15 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Cascade {
 		dst.Cascade = true
+	}
+	if src.RouterModel != "" {
+		dst.RouterModel = src.RouterModel
+	}
+	if src.RouterOllamaHost != "" {
+		dst.RouterOllamaHost = src.RouterOllamaHost
+	}
+	if src.Shadow {
+		dst.Shadow = true
 	}
 }
 

@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/connorhoulihan/rowtr/internal/config"
-	"github.com/connorhoulihan/rowtr/internal/sysinfo"
+	"github.com/9to5-worklife/rowtr/internal/config"
+	"github.com/9to5-worklife/rowtr/internal/sysinfo"
 )
 
 // Options controls the setup run.

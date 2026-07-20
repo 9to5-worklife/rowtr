@@ -1,4 +1,4 @@
-module github.com/connorhoulihan/rowtr
+module github.com/9to5-worklife/rowtr
 
 go 1.26.3
 

@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/connorhoulihan/rowtr/internal/backend"
-	"github.com/connorhoulihan/rowtr/internal/router"
-	"github.com/connorhoulihan/rowtr/internal/usage"
+	"github.com/9to5-worklife/rowtr/internal/backend"
+	"github.com/9to5-worklife/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/usage"
 )
 
 const titlePayload = `{"model":"claude-opus-4-8","max_tokens":512,"stream":false,` +

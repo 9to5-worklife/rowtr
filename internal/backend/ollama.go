@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // Ollama is the local Gatekeeper backend. It calls the daemon's /api/chat over

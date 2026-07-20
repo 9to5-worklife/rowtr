@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // Anthropic is the frontier Expert backend, using the official anthropic-sdk-go.

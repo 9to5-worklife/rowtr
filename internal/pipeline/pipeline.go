@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/connorhoulihan/rowtr/internal/backend"
-	"github.com/connorhoulihan/rowtr/internal/config"
-	"github.com/connorhoulihan/rowtr/internal/router"
+	"github.com/9to5-worklife/rowtr/internal/backend"
+	"github.com/9to5-worklife/rowtr/internal/config"
+	"github.com/9to5-worklife/rowtr/internal/router"
 )
 
 // Result is everything Rowtr learned from handling one prompt: the answer plus

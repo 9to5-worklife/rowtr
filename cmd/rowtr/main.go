@@ -52,6 +52,8 @@ func main() {
 		err = runServe(os.Args[2:])
 	case len(os.Args) > 1 && os.Args[1] == "score":
 		err = runScore(os.Args[2:])
+	case len(os.Args) > 1 && os.Args[1] == "label":
+		err = runLabel(os.Args[2:])
 	case len(os.Args) > 1 && os.Args[1] == "usage":
 		err = runUsage(os.Args[2:])
 	case len(os.Args) > 1 && os.Args[1] == "claude":
@@ -436,12 +438,17 @@ func runSetup(args []string) error {
 // list of cases where the two disagree.
 func runScore(args []string) error {
 	fs := flag.NewFlagSet("score", flag.ExitOnError)
-	evals := fs.String("evals", "evals/router.jsonl", "path to the eval JSONL file")
+	evals := fs.String("evals", "", "eval JSONL path (overrides --set)")
+	set := fs.String("set", "regression", "eval set: regression | generalization")
 	which := fs.String("router", "keyword", "router to score: keyword | model | both")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cases, err := eval.Load(*evals)
+	path, err := evalSetPath(*evals, *set)
+	if err != nil {
+		return err
+	}
+	cases, err := eval.Load(path)
 	if err != nil {
 		return err
 	}
@@ -498,6 +505,144 @@ func snippet(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// evalSetPath resolves the eval file: an explicit --evals wins; otherwise --set
+// names one of the two standard sets. The regression set is the circular
+// guardrail; the generalization set is the held-out one `rowtr label` grows.
+func evalSetPath(evals, set string) (string, error) {
+	if evals != "" {
+		return evals, nil
+	}
+	switch set {
+	case "regression":
+		return "evals/router.jsonl", nil
+	case "generalization":
+		return "evals/generalization.jsonl", nil
+	default:
+		return "", fmt.Errorf("invalid --set %q: want regression | generalization (or pass --evals)", set)
+	}
+}
+
+// runLabel turns mined shadow-mode disagreements into labeled eval cases. It
+// walks the shadow log, shows each case the keyword and model routers disagreed
+// on, and appends your offload verdict to a held-out generalization set — kept
+// separate from the circular regression set, so "is the router smarter?" can be
+// answered honestly rather than against the cases it was tuned on.
+func runLabel(args []string) error {
+	fs := flag.NewFlagSet("label", flag.ExitOnError)
+	shadowPath := fs.String("shadow", "", "shadow log path (default: the config-dir shadow.jsonl)")
+	out := fs.String("out", "evals/generalization.jsonl", "eval file to append labels to")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	sp := *shadowPath
+	if sp == "" {
+		p, err := config.ShadowPath()
+		if err != nil {
+			return err
+		}
+		sp = p
+	}
+	f, err := os.Open(sp)
+	if err != nil {
+		return fmt.Errorf("opening shadow log %s: %w\n"+
+			"  run a session with the shadow router on first: `rowtr serve --shadow` (or set shadow_router in config)", sp, err)
+	}
+	defer f.Close()
+
+	// Skip intents already labeled so re-runs only ask about new disagreements.
+	seen := map[string]bool{}
+	if existing, lerr := eval.Load(*out); lerr == nil {
+		for _, c := range existing {
+			seen[c.Prompt] = true
+		}
+	}
+
+	in := bufio.NewReader(os.Stdin)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var labeled, skipped int
+
+loop:
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var e struct {
+			Agree       bool   `json:"agree"`
+			Intent      string `json:"intent"`
+			KeywordTier string `json:"keyword_tier"`
+			ShadowTier  string `json:"shadow_tier"`
+			Tools       bool   `json:"tools"`
+		}
+		if json.Unmarshal([]byte(line), &e) != nil || e.Agree || e.Intent == "" || seen[e.Intent] {
+			continue
+		}
+		seen[e.Intent] = true
+
+		fmt.Printf("\n— disagreement —\n  keyword: %-9s model: %s\n  prompt: %s\n",
+			e.KeywordTier, e.ShadowTier, snippet(e.Intent, 300))
+		fmt.Print("  answer this LOCALLY? [y = yes / N = frontier / s = skip / q = quit] ")
+		ans, rerr := in.ReadString('\n')
+		if rerr != nil {
+			break
+		}
+		switch strings.TrimSpace(strings.ToLower(ans)) {
+		case "q", "quit":
+			fmt.Println("stopping.")
+			break loop
+		case "s", "skip":
+			skipped++
+		case "y", "yes":
+			if err := appendCase(*out, eval.Case{Prompt: e.Intent, Tools: e.Tools, Offload: true, Note: "shadow disagreement"}); err != nil {
+				return err
+			}
+			labeled++
+		default:
+			if err := appendCase(*out, eval.Case{Prompt: e.Intent, Tools: e.Tools, Offload: false, Note: "shadow disagreement"}); err != nil {
+				return err
+			}
+			labeled++
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+
+	fmt.Printf("\nlabeled %d case(s), skipped %d → %s\n", labeled, skipped, *out)
+	if labeled > 0 {
+		fmt.Println("score against it with:  rowtr score --set generalization --router both")
+	}
+	return nil
+}
+
+// appendCase appends one labeled eval case as a JSONL line, seeding a header
+// comment (eval.Load skips //-lines) when the file is created.
+func appendCase(path string, c eval.Case) error {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	_, statErr := os.Stat(path)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if os.IsNotExist(statErr) {
+		fmt.Fprintln(f, "// Rowtr generalization eval set — labeled from shadow-mode disagreements.")
+		fmt.Fprintln(f, "// Held out from evals/router.jsonl (the regression set) on purpose.")
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(f, string(b))
+	return err
 }
 
 // runServe starts the transparent Anthropic-compatible proxy.
@@ -570,15 +715,41 @@ func runServe(args []string) error {
 		}
 	}
 
+	// Cascade judge: the default is a second local pass (free but self-grading);
+	// "haiku" / a model name grades with the cheap Claude tier instead — a much
+	// better grader, and what lets the cascade be trusted.
+	cascadeJudgeModel := ""
+	switch cfg.CascadeJudge {
+	case "", "local":
+	case "haiku":
+		cascadeJudgeModel = config.DefaultDownshiftModel
+	default:
+		cascadeJudgeModel = cfg.CascadeJudge
+	}
+
+	// Cascade feedback log (user-private): every judged outcome, served or
+	// escalated, is a labeled "was local good enough?" example.
+	var cascadeLog io.Writer
+	if *cascade || cfg.Cascade {
+		if p, cerr := config.CascadeOutcomePath(); cerr == nil {
+			if f, ferr := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
+				defer f.Close()
+				cascadeLog = f
+			}
+		}
+	}
+
 	srv, err := proxy.New(proxy.Options{
 		Router: router.KeywordRouter{}, Upstream: *upstream, Local: local,
 		Mode: proxy.Mode(*mode), Store: store, Log: logger,
 		Token: token, RequireAuth: requireAuth,
-		DebugIntent:    os.Getenv("ROWTR_DEBUG_INTENT") == "1",
-		DownshiftModel: downshift,
-		Cascade:        *cascade || cfg.Cascade,
-		Shadow:         shadowRouter,
-		ShadowLog:      shadowLog,
+		DebugIntent:       os.Getenv("ROWTR_DEBUG_INTENT") == "1",
+		DownshiftModel:    downshift,
+		Cascade:           *cascade || cfg.Cascade,
+		CascadeJudgeModel: cascadeJudgeModel,
+		CascadeLog:        cascadeLog,
+		Shadow:            shadowRouter,
+		ShadowLog:         shadowLog,
 	})
 	if err != nil {
 		return err
@@ -599,7 +770,11 @@ func runServe(args []string) error {
 			logger.Printf("downshift: allowlisted housekeeping falls back to %s when the local model can't serve it", downshift)
 		}
 		if *cascade || cfg.Cascade {
-			logger.Printf("cascade ON: tool-free frontier prompts get one judged local attempt first")
+			judge := "a local self-judge"
+			if cascadeJudgeModel != "" {
+				judge = cascadeJudgeModel
+			}
+			logger.Printf("cascade ON: tool-free frontier prompts get one local attempt, graded by %s", judge)
 		}
 	}
 	return http.ListenAndServe(*addr, srv.Handler())

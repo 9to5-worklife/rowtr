@@ -175,14 +175,26 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
 <summary><b>Scoreboard — measure the routing</b></summary>
 
 ```bash
-./rowtr score                          # uses evals/router.jsonl
+./rowtr score                          # regression set (evals/router.jsonl)
 ./rowtr score --router both            # compare the keyword vs model router, list disagreements
+./rowtr score --set generalization     # score the held-out set (see below)
 ```
 
 Prints accuracy plus a confusion breakdown — **FP** = wrongly sent local (a quality
-risk), **FN** = a missed saving — and lists every mismatch with its reason. Grow the
-eval set from real traffic and treat accuracy as the number to beat before making the
-router fancier.
+risk), **FN** = a missed saving — and lists every mismatch with its reason.
+
+**Grow a *held-out* set from real traffic.** The regression set is circular — it can't
+tell you the router generalizes. Run a session with shadow mode on
+(`rowtr serve --shadow`), then:
+
+```bash
+./rowtr label                          # walk the router disagreements, label each → evals/generalization.jsonl
+./rowtr score --set generalization --router both
+```
+
+`label` only asks about cases the keyword and model routers disagreed on — exactly the
+cases the regression set doesn't cover. Treat the generalization accuracy as the number
+to beat before making the router fancier.
 </details>
 
 <details>
@@ -212,6 +224,7 @@ Config lives in the config file (written by `setup`); every value has an env ove
 | `ROWTR_PROXY_MODE` | `observe` | `observe` or `route` |
 | `ROWTR_DOWNSHIFT_MODEL` | `claude-haiku-4-5` | Cheaper Claude tier for housekeeping (`off` to disable) |
 | `ROWTR_CASCADE` | `0` | Try-local-then-judge before frontier (experimental) |
+| `ROWTR_CASCADE_JUDGE` | `local` | Who grades the cascade answer: `local` (self-judge) or `haiku` (cheap Claude) |
 | `ROWTR_ROUTER_MODEL` | `gemma3:270m` | SLM classifier for the shadow/model router |
 | `ROWTR_ROUTER_OLLAMA_HOST` | — | Host for the router model (e.g. a Raspberry Pi) |
 | `ROWTR_SHADOW` | `0` | Run the model router in shadow mode alongside keyword |

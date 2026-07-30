@@ -56,6 +56,14 @@ type Options struct {
 	DownshiftModel string
 	// Cascade enables try-local-then-judge for tool-free frontier prompts.
 	Cascade bool
+	// CascadeJudgeModel, when non-empty, grades cascade answers with this Claude
+	// model (reusing the client's own credentials) instead of a second local
+	// pass. Empty keeps the free, self-judging local grader.
+	CascadeJudgeModel string
+	// CascadeLog receives one JSON line per cascade outcome (served or
+	// escalated) — the feedback corpus. Lines carry the prompt intent, so the
+	// destination must be user-private (0o600). Nil disables outcome logging.
+	CascadeLog io.Writer
 	// Shadow runs an experimental second router on real human turns and logs
 	// how it compares to the authoritative one (see shadow.go). Nil disables.
 	Shadow router.Router
@@ -82,6 +90,7 @@ type Server struct {
 	rp             *httputil.ReverseProxy
 	counter        atomic.Uint64
 	shadowState
+	cascadeState
 }
 
 // New builds a proxy.
@@ -99,6 +108,10 @@ func New(opts Options) (*Server, error) {
 		shadowState: shadowState{
 			shadow: opts.Shadow, shadowLog: opts.ShadowLog,
 			shadowSem: make(chan struct{}, maxConcurrentShadows),
+		},
+		cascadeState: cascadeState{
+			cascadeJudgeModel: opts.CascadeJudgeModel,
+			cascadeLog:        opts.CascadeLog,
 		},
 	}
 	s.rp = s.reverseProxy()

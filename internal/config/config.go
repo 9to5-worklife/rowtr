@@ -23,6 +23,10 @@ type Config struct {
 	DownshiftModel string `json:"downshift_model,omitempty"`
 	// Cascade enables try-local-then-judge for tool-free prompts (route mode).
 	Cascade bool `json:"cascade,omitempty"`
+	// CascadeJudge picks who grades the local answer in the cascade:
+	// "" / "local" = a second local pass (free, but the model grades itself);
+	// "haiku" = the cheap Claude tier; any other value = an explicit judge model.
+	CascadeJudge string `json:"cascade_judge,omitempty"`
 	// RouterModel is the small classifier model the experimental model router
 	// asks for tier decisions (shadow mode / `rowtr score --router model`).
 	RouterModel string `json:"router_model,omitempty"`
@@ -93,6 +97,16 @@ func ShadowPath() (string, error) {
 	return filepath.Join(d, "shadow.jsonl"), nil
 }
 
+// CascadeOutcomePath is the cascade feedback log location. User-private: each
+// line carries the prompt intent (the labeled "was local good enough?" corpus).
+func CascadeOutcomePath() (string, error) {
+	d, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "cascade_outcomes.jsonl"), nil
+}
+
 // RouterHost resolves where the classifier model lives: the dedicated
 // RouterOllamaHost if set (e.g. a Raspberry Pi), else the local-tier Ollama.
 func (c Config) RouterHost() string {
@@ -128,6 +142,7 @@ func Load() Config {
 	if os.Getenv("ROWTR_CASCADE") == "1" {
 		cfg.Cascade = true
 	}
+	cfg.CascadeJudge = env("ROWTR_CASCADE_JUDGE", cfg.CascadeJudge)
 	cfg.RouterModel = env("ROWTR_ROUTER_MODEL", cfg.RouterModel)
 	cfg.RouterOllamaHost = env("ROWTR_ROUTER_OLLAMA_HOST", cfg.RouterOllamaHost)
 	if os.Getenv("ROWTR_SHADOW") == "1" {
@@ -200,6 +215,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Cascade {
 		dst.Cascade = true
+	}
+	if src.CascadeJudge != "" {
+		dst.CascadeJudge = src.CascadeJudge
 	}
 	if src.RouterModel != "" {
 		dst.RouterModel = src.RouterModel

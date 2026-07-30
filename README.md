@@ -225,6 +225,7 @@ Config lives in the config file (written by `setup`); every value has an env ove
 | `ROWTR_DOWNSHIFT_MODEL` | `claude-haiku-4-5` | Cheaper Claude tier for housekeeping (`off` to disable) |
 | `ROWTR_CASCADE` | `0` | Try-local-then-judge before frontier (experimental) |
 | `ROWTR_CASCADE_JUDGE` | `local` | Who grades the cascade answer: `local` (self-judge) or `haiku` (cheap Claude) |
+| `ROWTR_CACHE_1H` | `0` | Extend forwarded cache breakpoints to Anthropic's 1-hour TTL (keeps big contexts warm) |
 | `ROWTR_ROUTER_MODEL` | `gemma3:270m` | SLM classifier for the shadow/model router |
 | `ROWTR_ROUTER_OLLAMA_HOST` | — | Host for the router model (e.g. a Raspberry Pi) |
 | `ROWTR_SHADOW` | `0` | Run the model router in shadow mode alongside keyword |

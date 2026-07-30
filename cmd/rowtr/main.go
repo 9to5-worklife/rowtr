@@ -657,6 +657,7 @@ func runServe(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "don't require the "+proxy.AuthHeader+" header on /v1/messages")
 	unsafeRemote := fs.Bool("unsafe-remote", false, "allow a non-loopback listen address or a cleartext remote upstream")
 	cascade := fs.Bool("cascade", false, "try-local-then-judge for tool-free prompts (route mode; experimental)")
+	cache1h := fs.Bool("cache-1h", false, "upgrade forwarded requests' cache breakpoints to Anthropic's 1-hour TTL")
 	shadow := fs.Bool("shadow", false, "run the model router alongside the keyword router and log comparisons (experimental)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -748,6 +749,7 @@ func runServe(args []string) error {
 		Cascade:           *cascade || cfg.Cascade,
 		CascadeJudgeModel: cascadeJudgeModel,
 		CascadeLog:        cascadeLog,
+		Cache1h:           *cache1h || cfg.Cache1h,
 		Shadow:            shadowRouter,
 		ShadowLog:         shadowLog,
 	})
@@ -776,6 +778,9 @@ func runServe(args []string) error {
 			}
 			logger.Printf("cascade ON: tool-free frontier prompts get one local attempt, graded by %s", judge)
 		}
+	}
+	if *cache1h || cfg.Cache1h {
+		logger.Printf("cache-1h ON: forwarded requests' cache breakpoints extended to Anthropic's 1-hour TTL")
 	}
 	return http.ListenAndServe(*addr, srv.Handler())
 }

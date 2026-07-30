@@ -9,10 +9,11 @@ import (
 
 // tapUsage is the token accounting extracted from one frontier response.
 type tapUsage struct {
-	InTok      int // uncached, full-price input
-	CacheRead  int // input served from the prompt cache
-	CacheWrite int // input written to the prompt cache
-	OutTok     int
+	InTok       int // uncached, full-price input
+	CacheRead   int // input served from the prompt cache
+	CacheWrite  int // total input written to the prompt cache (5m + 1h)
+	CacheWrite1h int // the 1-hour-TTL portion of CacheWrite (priced 2× not 1.25×)
+	OutTok      int
 }
 
 // frontierTap wraps an upstream response body and extracts token usage as
@@ -77,6 +78,12 @@ type usageFields struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	// cache_creation splits the write by TTL; present when 1-hour caching is
+	// used. cache_creation_input_tokens is the sum of the two.
+	CacheCreation struct {
+		Ephemeral5m int `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 // sseEvent covers both usage-bearing SSE event shapes.
@@ -125,6 +132,9 @@ func (t *frontierTap) applyUsage(u usageFields) {
 	}
 	if u.CacheCreationInputTokens > t.u.CacheWrite {
 		t.u.CacheWrite = u.CacheCreationInputTokens
+	}
+	if u.CacheCreation.Ephemeral1h > t.u.CacheWrite1h {
+		t.u.CacheWrite1h = u.CacheCreation.Ephemeral1h
 	}
 }
 

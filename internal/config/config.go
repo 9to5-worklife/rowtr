@@ -27,6 +27,10 @@ type Config struct {
 	// "" / "local" = a second local pass (free, but the model grades itself);
 	// "haiku" = the cheap Claude tier; any other value = an explicit judge model.
 	CascadeJudge string `json:"cascade_judge,omitempty"`
+	// Cache1h upgrades forwarded requests' ephemeral cache breakpoints from the
+	// 5-minute default to Anthropic's 1-hour TTL, so a resent context survives
+	// think-time gaps instead of cache-missing into a full-price re-read.
+	Cache1h bool `json:"cache_1h,omitempty"`
 	// RouterModel is the small classifier model the experimental model router
 	// asks for tier decisions (shadow mode / `rowtr score --router model`).
 	RouterModel string `json:"router_model,omitempty"`
@@ -143,6 +147,9 @@ func Load() Config {
 		cfg.Cascade = true
 	}
 	cfg.CascadeJudge = env("ROWTR_CASCADE_JUDGE", cfg.CascadeJudge)
+	if os.Getenv("ROWTR_CACHE_1H") == "1" {
+		cfg.Cache1h = true
+	}
 	cfg.RouterModel = env("ROWTR_ROUTER_MODEL", cfg.RouterModel)
 	cfg.RouterOllamaHost = env("ROWTR_ROUTER_OLLAMA_HOST", cfg.RouterOllamaHost)
 	if os.Getenv("ROWTR_SHADOW") == "1" {
@@ -219,6 +226,9 @@ func merge(dst *Config, src Config) {
 	if src.CascadeJudge != "" {
 		dst.CascadeJudge = src.CascadeJudge
 	}
+	if src.Cache1h {
+		dst.Cache1h = true
+	}
 	if src.RouterModel != "" {
 		dst.RouterModel = src.RouterModel
 	}
@@ -249,10 +259,12 @@ var prices = map[string]Price{
 	"claude-haiku-4-5": {InputPerM: 1.00, OutputPerM: 5.00},
 }
 
-// Prompt-cache pricing multipliers on the input rate (Anthropic, 5-minute TTL).
+// Prompt-cache pricing multipliers on the base input rate (Anthropic): cache
+// reads are 0.1×, 5-minute writes 1.25×, and 1-hour writes 2×.
 const (
-	CacheReadMult  = 0.1
-	CacheWriteMult = 1.25
+	CacheReadMult    = 0.1
+	CacheWriteMult   = 1.25
+	CacheWriteMult1h = 2.0
 )
 
 // EstimateCostUSD returns the estimated dollar cost of a completion. Unknown
@@ -261,15 +273,23 @@ func EstimateCostUSD(model string, inputTokens, outputTokens int) float64 {
 	return EstimateCostUSDCached(model, inputTokens, 0, 0, outputTokens)
 }
 
-// EstimateCostUSDCached prices a completion with cache-aware input rates:
-// uncached input at 1×, cache reads at ~0.1×, cache writes at 1.25×.
+// EstimateCostUSDCached prices a completion with cache-aware input rates,
+// treating all cache writes as 5-minute (1.25×).
 func EstimateCostUSDCached(model string, inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens int) float64 {
+	return EstimateCostUSDCached1h(model, inputTokens, cacheReadTokens, cacheWriteTokens, 0, outputTokens)
+}
+
+// EstimateCostUSDCached1h prices a completion splitting cache writes into
+// 5-minute (1.25×) and 1-hour (2×) portions — the 1-hour TTL costs more to
+// write, so pricing it correctly keeps the savings numbers honest.
+func EstimateCostUSDCached1h(model string, inputTokens, cacheReadTokens, cacheWrite5mTokens, cacheWrite1hTokens, outputTokens int) float64 {
 	p, ok := prices[model]
 	if !ok {
 		return 0
 	}
 	in := float64(inputTokens) +
 		float64(cacheReadTokens)*CacheReadMult +
-		float64(cacheWriteTokens)*CacheWriteMult
+		float64(cacheWrite5mTokens)*CacheWriteMult +
+		float64(cacheWrite1hTokens)*CacheWriteMult1h
 	return in/1e6*p.InputPerM + float64(outputTokens)/1e6*p.OutputPerM
 }

@@ -64,6 +64,10 @@ type Options struct {
 	// escalated) — the feedback corpus. Lines carry the prompt intent, so the
 	// destination must be user-private (0o600). Nil disables outcome logging.
 	CascadeLog io.Writer
+	// Cache1h upgrades forwarded requests' ephemeral cache breakpoints to the
+	// 1-hour TTL so a resent context survives think-time gaps. Off by default —
+	// it costs more to write the cache, so it only pays when gaps exceed 5 min.
+	Cache1h bool
 	// Shadow runs an experimental second router on real human turns and logs
 	// how it compares to the authoritative one (see shadow.go). Nil disables.
 	Shadow router.Router
@@ -86,6 +90,7 @@ type Server struct {
 	debugIntent    bool
 	downshiftModel string
 	cascade        bool
+	cache1h        bool
 	dedup          *dedupCache
 	rp             *httputil.ReverseProxy
 	counter        atomic.Uint64
@@ -104,7 +109,8 @@ func New(opts Options) (*Server, error) {
 		store: opts.Store, log: opts.Log,
 		token: opts.Token, requireAuth: opts.RequireAuth, debugIntent: opts.DebugIntent,
 		downshiftModel: opts.DownshiftModel, cascade: opts.Cascade,
-		dedup: newDedupCache(),
+		cache1h: opts.Cache1h,
+		dedup:   newDedupCache(),
 		shadowState: shadowState{
 			shadow: opts.Shadow, shadowLog: opts.ShadowLog,
 			shadowSem: make(chan struct{}, maxConcurrentShadows),
@@ -202,10 +208,11 @@ func (s *Server) reverseProxy() *httputil.ReverseProxy {
 				if s.store == nil {
 					return
 				}
-				cost := config.EstimateCostUSDCached(model, u.InTok, u.CacheRead, u.CacheWrite, u.OutTok)
+				cw5 := u.CacheWrite - u.CacheWrite1h // 5-minute writes = total minus the 1-hour portion
+				cost := config.EstimateCostUSDCached1h(model, u.InTok, u.CacheRead, cw5, u.CacheWrite1h, u.OutTok)
 				saved := 0.0
 				if reqModel != "" && reqModel != model { // downshifted — savings vs the requested model
-					if d := config.EstimateCostUSDCached(reqModel, u.InTok, u.CacheRead, u.CacheWrite, u.OutTok) - cost; d > 0 {
+					if d := config.EstimateCostUSDCached1h(reqModel, u.InTok, u.CacheRead, cw5, u.CacheWrite1h, u.OutTok) - cost; d > 0 {
 						saved = d
 					}
 				}
@@ -359,6 +366,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		out.Intent != "" && out.Tier == router.Frontier && len(body) <= maxCascadeBody {
 		if s.serveCascade(w, r, req, out, category) {
 			return
+		}
+	}
+
+	// 1-hour cache upgrade: extend this request's ephemeral cache breakpoints so
+	// the big resent context survives a >5-minute gap instead of cache-missing
+	// into a full-price re-read. Only rewrites if there's a breakpoint to
+	// upgrade — otherwise the body is forwarded byte-identical.
+	if s.cache1h && len(body) > 0 {
+		if nb, ok := upgradeCacheTTL(body); ok {
+			r.Body = io.NopCloser(bytes.NewReader(nb))
+			r.ContentLength = int64(len(nb))
 		}
 	}
 
